@@ -1,0 +1,25 @@
+[project]
+name = "voxcpmane"
+version = "0.0.1"
+description = "VoxCPM TTS model with Apple Neural Engine backend server"
+readme = "README.md"
+    requires-python = ">=3.11,<3.13"
+dependencies = [
+    "coremltools==8.3.0",
+    "einops>=0.8.1",
+    "fastapi>=0.121.0",
+    "gradio>=5.49.1",
+    "inflect>=7.5.0",
+    "numpy>=2.3.4",
+    "sounddevice>=0.5.3",
+    "soundfile>=0.13.1",
+    "soxr>=1.0.0",
+    "transformers>=4.57.1",
+    "uvicorn>=0.38.0",
+    "wetext>=0.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.9.0",
+]

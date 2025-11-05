@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ANE VoxCPM TTS Playground</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Simple spinner animation */
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans p-4 md:p-8">
+
+    <div class="max-w-2xl mx-auto">
+        <header class="mb-8">
+            <h1 class="text-4xl font-bold text-center text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">
+                ANE VoxCPM TTS Playground
+            </h1>
+        </header>
+
+        <!-- Status Message -->
+        <div id="status-message" class="hidden p-4 rounded-lg mb-6 text-center"></div>
+
+        <!-- TTS Form -->
+        <form id="tts-form" class="space-y-6 bg-gray-800 p-6 rounded-xl shadow-2xl">
+            <!-- Text to Generate -->
+            <div>
+                <label for="text-input" class="block text-sm font-medium text-gray-300 mb-2">
+                    Text to Generate
+                </label>
+                <textarea id="text-input" rows="4" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Enter text to synthesize...">Jittery Jack's jam jars jiggled jauntily, jolting Jack's jumbled jelly-filled jars joyously.
+Cindy's circular cymbals clanged cheerfully, clashing crazily near Carla's crashing crockery.
+You think you can just waltz in here and cause chaos? Well, I've got news for you.</textarea>
+            </div>
+
+            <!-- Prompt Text -->
+            <div>
+                <label for="prompt-text" class="block text-sm font-medium text-gray-300 mb-2">
+                    Prompt Text
+                </label>
+                <textarea id="prompt-text" rows="2" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Not required if using a provided voice">Get in line troublemakers, and I'll take care of you.</textarea>
+            </div>
+
+            <!-- Voice Selection -->
+            <div>
+                <label for="voice-select" class="block text-sm font-medium text-gray-300 mb-2">
+                    Voice Selection (Optional)
+                </label>
+                <select id="voice-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                    <option value="">Use Prompt Audio</option>
+                </select>
+                <div id="voice-status" class="mt-2 text-sm text-gray-400"></div>
+            </div>
+
+            <!-- Prompt WAV Path -->
+            <div id="prompt-section">
+                <label for="prompt-wav-path" class="block text-sm font-medium text-gray-300 mb-2">
+                    Prompt WAV Path (on server)
+                </label>
+                <input type="text" id="prompt-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+            </div>
+
+            <!-- Generation Parameters -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label for="max-length" class="block text-sm font-medium text-gray-300 mb-2">
+                        Max Length
+                    </label>
+                    <input type="number" id="max-length" value="2048" min="1" max="2048" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                    <div class="mt-1 text-xs text-gray-500">Maximum generated sequence length (1-2048)</div>
+                </div>
+                <div>
+                    <label for="cfg-value" class="block text-sm font-medium text-gray-300 mb-2">
+                        CFG Value
+                    </label>
+                    <input type="number" id="cfg-value" value="2.0" min="0.0" max="10.0" step="0.1" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                    <div class="mt-1 text-xs text-gray-500">Classifier-free guidance value (0.0-10.0)</div>
+                </div>
+                <div>
+                    <label for="inference-timesteps" class="block text-sm font-medium text-gray-300 mb-2">
+                        Inference Timesteps
+                    </label>
+                    <input type="number" id="inference-timesteps" value="10" min="1" max="100" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                    <div class="mt-1 text-xs text-gray-500">Number of inference steps (1-100)</div>
+                </div>
+            </div>
+
+            <!-- Buttons -->
+            <div class="flex flex-col sm:flex-row gap-4">
+                <button type="submit" id="play-button" class="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:from-purple-700 hover:to-pink-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <!-- Play Icon -->
+                    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
+                    <span id="play-button-text">Generate & Play</span>
+                    <!-- Spinner (hidden by default) -->
+                    <div id="spinner" class="hidden spinner w-5 h-5 border-t-2 border-b-2 border-white rounded-full"></div>
+                </button>
+                <button type="button" id="stop-button" class="flex-1 bg-gray-600 text-gray-200 font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-gray-500 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                    Stop Playback
+                </button>
+            </div>
+        </form>
+        
+        <!-- NEW: Audio Player (hidden by default) -->
+        <div id="audio-player-container" class="hidden mt-6 bg-gray-800 p-4 rounded-xl shadow-2xl">
+            <label class="block text-sm font-medium text-gray-300 mb-3">
+                Full Audio Playback
+            </label>
+            <audio id="audio-player" controls class="w-full"></audio>
+        </div>
+
+    </div>
+
+    <script>
+        // --- DOM Elements ---
+        const ttsForm = document.getElementById('tts-form');
+        const playButton = document.getElementById('play-button');
+        const playButtonText = document.getElementById('play-button-text');
+        const stopButton = document.getElementById('stop-button');
+        const spinner = document.getElementById('spinner');
+        const statusMessage = document.getElementById('status-message');
+
+        const textInput = document.getElementById('text-input');
+        const promptTextInput = document.getElementById('prompt-text');
+        const promptWavPathInput = document.getElementById('prompt-wav-path');
+        
+        // --- NEW: Voice Selection Elements ---
+        const voiceSelect = document.getElementById('voice-select');
+        const voiceStatus = document.getElementById('voice-status');
+        const promptSection = document.getElementById('prompt-section');
+        
+        // --- NEW: Parameter Elements ---
+        const maxLengthInput = document.getElementById('max-length');
+        const cfgValueInput = document.getElementById('cfg-value');
+        const inferenceTimestepsInput = document.getElementById('inference-timesteps');
+        
+        // --- NEW: Audio Player Elements ---
+        const audioPlayerContainer = document.getElementById('audio-player-container');
+        const audioPlayer = document.getElementById('audio-player');
+
+        // --- AudioContext Variables ---
+        let audioContext;
+        let streamReader;
+        let nextStartTime = 0; // Time at which the next audio chunk should start playing
+        let isPlaying = false;
+        let sampleRate = 16000; // Default, will try to get from header
+        
+        // --- NEW: Array to store audio chunks for final playback ---
+        let audioChunks = [];
+
+        // --- NEW: Load available voices on page load ---
+        async function loadAvailableVoices() {
+            try {
+                const response = await fetch('/voices');
+                const data = await response.json();
+                
+                // Clear existing options except the first one
+                voiceSelect.innerHTML = '<option value="">Use Prompt Audio</option>';
+                
+                // Add voice options
+                data.voices.forEach(voice => {
+                    const option = document.createElement('option');
+                    option.value = voice;
+                    option.textContent = voice;
+                    voiceSelect.appendChild(option);
+                });
+                
+                voiceStatus.textContent = `Found ${data.count} available voices`;
+                voiceStatus.className = 'mt-2 text-sm text-green-400';
+                
+            } catch (error) {
+                console.error('Error loading voices:', error);
+                voiceStatus.textContent = 'Failed to load available voices';
+                voiceStatus.className = 'mt-2 text-sm text-red-400';
+            }
+        }
+
+        // --- NEW: Handle voice selection changes ---
+        voiceSelect.addEventListener('change', (event) => {
+            const selectedVoice = event.target.value;
+            if (selectedVoice) {
+                // Hide prompt section when using cached voice
+                promptSection.style.display = 'none';
+                voiceStatus.textContent = `Using cached voice: ${selectedVoice}`;
+                voiceStatus.className = 'mt-2 text-sm text-blue-400';
+            } else {
+                // Show prompt section when not using cached voice
+                promptSection.style.display = 'block';
+                voiceStatus.textContent = 'Using prompt audio';
+                voiceStatus.className = 'mt-2 text-sm text-gray-400';
+            }
+        });
+
+        // --- Load voices when page loads ---
+        loadAvailableVoices();
+
+        // --- Utility to show status messages ---
+        function showStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            statusMessage.className = 'p-4 rounded-lg mb-6 text-center '; // Reset classes
+            
+            if (type === 'error') {
+                statusMessage.classList.add('bg-red-800', 'text-red-100');
+            } else if (type === 'success') {
+                statusMessage.classList.add('bg-green-800', 'text-green-100');
+            } else { // 'info'
+                statusMessage.classList.add('bg-blue-800', 'text-blue-100');
+            }
+            statusMessage.classList.remove('hidden');
+        }
+        function hideStatus() {
+            statusMessage.classList.add('hidden');
+        }
+        
+        // --- UI State Management ---
+        function setPlayingState(playing) {
+            isPlaying = playing;
+            if (playing) {
+                playButton.disabled = true;
+                stopButton.disabled = false;
+                spinner.classList.remove('hidden');
+                playButtonText.textContent = 'Generating...';
+            } else {
+                // This state is for "finished" or "stopped"
+                playButton.disabled = false;
+                stopButton.disabled = true;
+                spinner.classList.add('hidden');
+                playButtonText.textContent = 'Generate & Play';
+                streamReader = null; // Clear reader
+                // We no longer close the audioContext here
+            }
+        }
+
+        // --- Form Submit Handler ---
+        ttsForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            // --- MODIFIED ---
+            // Close any existing context from a previous run
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close().then(() => console.log('Previous AudioContext closed.'));
+            }
+            // Hide player and reset chunks
+            audioPlayerContainer.classList.add('hidden');
+            if (audioPlayer.src) {
+                URL.revokeObjectURL(audioPlayer.src); // Revoke old URL
+            }
+            audioPlayer.src = '';
+            audioChunks = [];
+            // --- END MODIFIED ---
+            
+            const text = textInput.value;
+            if (!text.trim()) {
+                showStatus('Please enter some text to generate.', 'error');
+                return;
+            }
+
+            hideStatus();
+            setPlayingState(true);
+
+            // Initialize AudioContext on user interaction
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                nextStartTime = audioContext.currentTime + 0.1; // Add slight delay
+                console.log('AudioContext started, state:', audioContext.state);
+            } catch (e) {
+                console.error('Error creating AudioContext:', e);
+                showStatus('Error: Could not initialize Web Audio. ' + e.message, 'error');
+                setPlayingState(false);
+                return;
+            }
+
+            // --- Fetch and Process Stream ---
+            try {
+                // Build request object with new parameters
+                const requestBody = {
+                    input: text,
+                    response_format: 'pcm',
+                    max_length: parseInt(maxLengthInput.value),
+                    cfg_value: parseFloat(cfgValueInput.value),
+                    inference_timesteps: parseInt(inferenceTimestepsInput.value)
+                };
+
+                // Add voice or prompt parameters based on selection
+                const selectedVoice = voiceSelect.value;
+                if (selectedVoice) {
+                    requestBody.voice = selectedVoice;
+                } else {
+                    requestBody.prompt_wav_path = promptWavPathInput.value;
+                    requestBody.prompt_text = promptTextInput.value;
+                }
+
+                const response = await fetch('/v1/audio/speech/stream', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/octet-stream',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    const errorBody = await response.json();
+                    throw new Error(errorBody.detail || `Server error: ${response.status}`);
+                }
+
+                // Try to get sample rate from header
+                const headerSampleRate = response.headers.get('X-Sample-Rate');
+                if (headerSampleRate) {
+                    sampleRate = parseInt(headerSampleRate, 10);
+                    console.log('Using sample rate from header:', sampleRate);
+                } else {
+                    console.warn(`No X-Sample-Rate header found, defaulting to ${sampleRate}Hz.`);
+                }
+                
+                streamReader = response.body.getReader();
+
+                // Start processing the stream
+                showStatus('Streaming... Audio will play shortly.', 'info');
+                playButtonText.textContent = 'Playing...';
+                
+                processStream();
+
+            } catch (error) {
+                console.error('Fetch error:', error);
+                showStatus(`Error: ${error.message}`, 'error');
+                setPlayingState(false);
+                if (audioContext && audioContext.state !== 'closed') {
+                    audioContext.close(); // Close context on fetch error
+                }
+            }
+        });
+
+        // --- Stop Button Handler ---
+        stopButton.addEventListener('click', async () => {
+            // Cancel the stream reader first
+            if (streamReader) {
+                streamReader.cancel('User stopped playback.').catch(() => {});
+            }
+            
+            // Call the server cancellation endpoint
+            try {
+                const response = await fetch('/v1/audio/speech/cancel', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    console.log('Server cancellation successful:', result.message);
+                } else {
+                    console.error('Server cancellation failed:', response.status);
+                }
+            } catch (error) {
+                console.error('Error calling server cancellation:', error);
+            }
+            
+            // Close the audio context
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close().then(() => {
+                    console.log('AudioContext closed by user.');
+                });
+                audioContext = null;
+            }
+            
+            setPlayingState(false);
+            showStatus('Playback stopped by user.', 'info');
+            
+            // --- NEW: Hide player on manual stop ---
+            audioPlayerContainer.classList.add('hidden');
+            if (audioPlayer.src) {
+                URL.revokeObjectURL(audioPlayer.src);
+            }
+            audioPlayer.src = '';
+        });
+
+        // --- Core Stream Processing Function ---
+        async function processStream() {
+            if (!streamReader) return;
+
+            try {
+                const { done, value } = await streamReader.read();
+
+                // --- MODIFICATION: Handle stream completion ---
+                if (done) {
+                    console.log('Stream download finished. Waiting for playback to complete.');
+                    
+                    if (audioContext && audioContext.state !== 'closed' && isPlaying) {
+                        // 1. Build the final audio player
+                        buildFinalAudio(); 
+
+                        // 2. Calculate remaining playback time
+                        const remainingTimeInSeconds = nextStartTime - audioContext.currentTime;
+                        const delayInMs = Math.max(0, remainingTimeInSeconds * 1000) + 250; // 250ms buffer
+                        
+                        console.log(`Playback will finish in ${remainingTimeInSeconds.toFixed(2)}s. Closing context in ${delayInMs.toFixed(0)}ms.`);
+
+                        // 3. Schedule the context closure and UI update
+                        setTimeout(() => {
+                            if (audioContext && audioContext.state !== 'closed') {
+                                audioContext.close().then(() => console.log('AudioContext closed after finishing.'));
+                                audioContext = null;
+                            }
+                            
+                            // Update UI only if the user hasn't stopped it in the meantime
+                            if (isPlaying) { 
+                                showStatus('Playback finished.', 'success');
+                                setPlayingState(false);
+                            }
+                        }, delayInMs);
+
+                    } else {
+                        // Stream finished, but context is already closed or user stopped
+                        if (isPlaying) {
+                            setPlayingState(false);
+                        }
+                    }
+                    return;
+                }
+                // --- END MODIFICATION ---
+
+
+                // --- Web Audio Magic ---
+                // 'value' is a Uint8Array. We need to convert it to 16-bit PCM (Int16Array)
+                // then to 32-bit float (-1.0 to 1.0) for the Web Audio API.
+
+                // --- BUG FIX ---
+                // 1. Create an Int16Array view on the *correct* buffer region
+                const chunkByteLength = value.byteLength;
+                const alignedByteLength = chunkByteLength - (chunkByteLength % 2);
+                
+                if (alignedByteLength === 0) {
+                    processStream(); // Read next chunk
+                    return;
+                }
+                
+                const pcm16Data = new Int16Array(
+                    value.buffer,
+                    value.byteOffset,
+                    alignedByteLength / 2 // Length in Int16 elements
+                );
+                // --- END BUG FIX ---
+
+                // 2. Create a Float32Array and normalize the data
+                const numSamples = pcm16Data.length;
+                const pcm32Data = new Float32Array(numSamples);
+                for (let i = 0; i < numSamples; i++) {
+                    pcm32Data[i] = pcm16Data[i] / 32768.0; // Normalize from -32768/32767 to -1.0/1.0
+                }
+                
+                // --- NEW: Store this chunk for the final audio file ---
+                audioChunks.push(pcm32Data);
+
+                // 3. Create an AudioBuffer
+                if (!audioContext || audioContext.state === 'closed') {
+                    console.log('AudioContext is closed, stopping stream processing.');
+                    return;
+                }
+                const audioBuffer = audioContext.createBuffer(
+                    1,             // 1 channel (mono)
+                    numSamples,    // Number of samples
+                    sampleRate     // Sample rate
+                );
+                audioBuffer.getChannelData(0).set(pcm32Data);
+
+                // 4. Create a source node, connect it, and schedule it to play
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+
+                // 5. Schedule playback
+                const playTime = Math.max(nextStartTime, audioContext.currentTime);
+                source.start(playTime);
+
+                // 6. Update the start time for the *next* chunk
+                nextStartTime = playTime + audioBuffer.duration;
+                // -------------------------
+
+                // Continue reading the stream
+                processStream();
+
+            } catch (error) {
+                if (error.name === 'AbortError' || (error.message && error.message.includes('User stopped'))) {
+                    console.log('Stream reading cancelled by user.');
+                } else {
+                    console.error('Error reading stream:', error);
+                    showStatus(`Stream error: ${error.message}`, 'error');
+                }
+                setPlayingState(false);
+                if (audioContext && audioContext.state !== 'closed') {
+                    audioContext.close();
+                }
+            }
+        }
+        
+        // --- NEW: Function to build the final audio player source ---
+        function buildFinalAudio() {
+            // --- MODIFIED: Removed audioContext check ---
+            // This function relies on OfflineAudioContext, 
+            // so it doesn't need the main one to be open.
+            if (!audioChunks.length) { 
+                console.log('No audio chunks to build final audio.');
+                return;
+            }
+            // --- END MODIFIED ---
+
+            try {
+                const totalSamples = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+                if (totalSamples === 0) {
+                    console.log('No samples to build audio.');
+                    return;
+                }
+
+                // Use the *offline* context to stitch buffer
+                const offlineCtx = new OfflineAudioContext(1, totalSamples, sampleRate);
+                const bufferSource = offlineCtx.createBufferSource();
+
+                const finalBuffer = offlineCtx.createBuffer(1, totalSamples, sampleRate);
+                let offset = 0;
+                for (const chunk of audioChunks) {
+                    finalBuffer.getChannelData(0).set(chunk, offset);
+                    offset += chunk.length;
+                }
+
+                bufferSource.buffer = finalBuffer;
+                bufferSource.connect(offlineCtx.destination);
+                bufferSource.start();
+
+                offlineCtx.startRendering().then(renderedBuffer => {
+                    const wavBlob = bufferToWave(renderedBuffer);
+                    const audioUrl = URL.createObjectURL(wavBlob);
+                    
+                    audioPlayer.src = audioUrl;
+                    audioPlayerContainer.classList.remove('hidden');
+                }).catch(e => {
+                    console.error('Error rendering final audio:', e);
+                    showStatus('Could not render final audio file.', 'error');
+                });
+
+            } catch (e) {
+                console.error('Error building final audio:', e);
+                showStatus('Could not build final audio file.', 'error');
+            }
+        }
+        
+        // --- NEW: Function to convert an AudioBuffer to a WAV file (Blob) ---
+        function bufferToWave(audioBuffer) {
+            const numOfChan = audioBuffer.numberOfChannels;
+            const sampleRate = audioBuffer.sampleRate;
+            const length = audioBuffer.length * numOfChan * 2 + 44;
+            const buffer = new ArrayBuffer(length);
+            const view = new DataView(buffer);
+            const channels = [];
+            let i, sample;
+            let offset = 0;
+
+            for (i = 0; i < numOfChan; i++) {
+                channels.push(audioBuffer.getChannelData(i));
+            }
+
+            // Write WAV header
+            writeString(view, offset, 'RIFF'); offset += 4; // "RIFF"
+            view.setUint32(offset, length - 8, true); offset += 4; // file length - 8
+            writeString(view, offset, 'WAVE'); offset += 4; // "WAVE"
+            writeString(view, offset, 'fmt '); offset += 4; // "fmt "
+            view.setUint32(offset, 16, true); offset += 4; // chunk size
+            view.setUint16(offset, 1, true); offset += 2; // format (1 = PCM)
+            view.setUint16(offset, numOfChan, true); offset += 2; // num channels
+            view.setUint32(offset, sampleRate, true); offset += 4; // sample rate
+            view.setUint32(offset, sampleRate * 2 * numOfChan, true); offset += 4; // byte rate
+            view.setUint16(offset, numOfChan * 2, true); offset += 2; // block align
+            view.setUint16(offset, 16, true); offset += 2; // bits per sample
+            writeString(view, offset, 'data'); offset += 4; // "data"
+            view.setUint32(offset, length - 44, true); offset += 4; // data chunk size
+
+            // Write PCM data
+            for (i = 0; i < audioBuffer.length; i++) {
+                for (let chan = 0; chan < numOfChan; chan++) {
+                    sample = Math.max(-1, Math.min(1, channels[chan][i]));
+                    sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF) | 0;
+                    view.setInt16(offset, sample, true);
+                    offset += 2;
+                }
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+    </script>
+</body>
+</html>
