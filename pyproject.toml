@@ -1,9 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "voxcpmane"
 version = "0.0.1"
 description = "VoxCPM TTS model with Apple Neural Engine backend server"
 readme = "README.md"
-    requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "coremltools==8.3.0",
     "einops>=0.8.1",
@@ -17,9 +21,23 @@ dependencies = [
     "transformers>=4.57.1",
     "uvicorn>=0.38.0",
     "wetext>=0.1.0",
+    
+    # --- Added missing dependencies from server.py ---
+    "tqdm",
+    "aiofiles",
+    "huggingface_hub"
 ]
+
+[project.scripts]
+voxcpmane-server = "voxcpmane.server:main"
 
 [dependency-groups]
 dev = [
     "black>=25.9.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+voxcpmane = ["frontend/index.html"]

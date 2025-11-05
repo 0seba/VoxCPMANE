@@ -6,6 +6,7 @@ import numpy as np
 import sounddevice as sd
 from tqdm import tqdm
 import uvicorn
+import pathlib
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from starlette.background import BackgroundTask
 from fastapi.responses import (
@@ -25,6 +26,7 @@ import aiofiles
 from huggingface_hub import snapshot_download
 import asyncio
 from dataclasses import dataclass
+import argparse
 
 # ===================================================================
 # 🚀 1. Model Setup (Unchanged)
@@ -40,9 +42,9 @@ try:
     MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
     print(f"✅ Model files are available at: {MODEL_PATH_PREFIX}")
     VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
-    
+
     # ... [All your model path and file existence checks] ...
-    
+
     locdit_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "locdit_f16.mlmodelc")
     projections_mlmodel_path = os.path.join(
         MODEL_PATH_PREFIX, "projections_1_t.mlmodelc"
@@ -85,16 +87,28 @@ try:
 
     # --- Model Loading ---
     print("Loading CoreML models...")
-    locdit_mlmodel = ct.models.CompiledMLModel(locdit_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    projections_mlmodel = ct.models.CompiledMLModel(projections_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    feature_encoder_mlmodel = ct.models.CompiledMLModel(feature_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    fsq_mlmodel = ct.models.CompiledMLModel(fsq_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
-    audio_vae_decoder_mlmodel = ct.models.CompiledMLModel(audio_vae_decoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
-    audio_vae_encoder_mlmodel = ct.models.CompiledMLModel(audio_vae_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
+    locdit_mlmodel = ct.models.CompiledMLModel(
+        locdit_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    projections_mlmodel = ct.models.CompiledMLModel(
+        projections_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    feature_encoder_mlmodel = ct.models.CompiledMLModel(
+        feature_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    fsq_mlmodel = ct.models.CompiledMLModel(
+        fsq_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
+    audio_vae_decoder_mlmodel = ct.models.CompiledMLModel(
+        audio_vae_decoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
+    audio_vae_encoder_mlmodel = ct.models.CompiledMLModel(
+        audio_vae_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
     base_lm_embed_tokens = np.load(base_lm_embed_tokens_path)
 
-    from src.voxcpm import VoxCPMANE
-    
+    from .voxcpm import VoxCPMANE
+
     model = VoxCPMANE(
         "openbmb/VoxCPM-0.5B",
         base_lm_mf_path,
@@ -123,6 +137,7 @@ except Exception as e:
 # ⚙️ 2. Generation Actor (Worker) Setup
 # ===================================================================
 
+
 # This dataclass defines a "job" for the generation worker
 @dataclass
 class GenerationJob:
@@ -130,6 +145,7 @@ class GenerationJob:
     output_queue: queue.Queue  # Worker puts audio chunks here
     cancel_event: threading.Event  # Endpoint sets this on disconnect
     job_id: int
+
 
 # The central job queue. maxsize=1 means only one job can be
 # "pending". This acts as our "is_processing" flag.
@@ -142,14 +158,17 @@ CURRENT_JOB: Optional[GenerationJob] = None
 # A counter for unique job IDs, just for logging
 JOB_COUNTER = 0
 
+
 def generation_worker():
     """
     This is the *only* thread that touches the C++ model.
     It runs forever, waiting for jobs from GENERATION_QUEUE.
     """
     global CURRENT_JOB
-    print(f"[Worker] 🚀 Generation worker thread started (TID: {threading.current_thread().ident})")
-    
+    print(
+        f"[Worker] 🚀 Generation worker thread started (TID: {threading.current_thread().ident})"
+    )
+
     while True:
         try:
             # 1. Wait for a job
@@ -169,7 +188,7 @@ def generation_worker():
                     max_length=job.request.max_length,
                     cfg_value=job.request.cfg_value,
                     inference_timesteps=job.request.inference_timesteps,
-                    cancellation_event=job.cancel_event  # Pass the per-job event
+                    cancellation_event=job.cancel_event,  # Pass the per-job event
                 )
 
                 # 3. Feed chunks to the output queue
@@ -177,12 +196,12 @@ def generation_worker():
                     if job.cancel_event.is_set():
                         print(f"[Worker] 🟡 Job {job.job_id} cancelled by event.")
                         break
-                    
+
                     # Put chunk in the output queue.
                     # This might block if the client isn't consuming,
                     # which is what we want (backpressure).
                     job.output_queue.put(chunk)
-                
+
                 if not job.cancel_event.is_set():
                     print(f"[Worker] ✅ Job {job.job_id} finished normally.")
 
@@ -191,7 +210,7 @@ def generation_worker():
                 print(f"[Worker] ❌ Error during generation for Job {job.job_id}: {e}")
                 # Send the error to the client via the queue
                 job.output_queue.put(e)
-            
+
             finally:
                 # 4. Signal completion (or error/cancellation)
                 # Put the "None" sentinel to tell the client we're done
@@ -199,13 +218,13 @@ def generation_worker():
                 print(f"[Worker] 🏁 Job {job.job_id} complete. Cleaning up.")
                 CURRENT_JOB = None
                 GENERATION_QUEUE.task_done()
-                
+
         except Exception as e:
             # Handle errors in the worker loop itself
             print(f"[Worker] ❌ FATAL WORKER ERROR: {e}. Restarting loop.")
             # Clear state to be safe
             CURRENT_JOB = None
-            if 'job' in locals() and isinstance(job, GenerationJob):
+            if "job" in locals() and isinstance(job, GenerationJob):
                 job.output_queue.put(Exception("Worker failed"))
                 GENERATION_QUEUE.task_done()
             time.sleep(1)
@@ -221,6 +240,9 @@ CACHED_VOICE_TEXT = """Jittery Jack's jam jars jiggled jauntily, jolting Jack's 
 Cindy's circular cymbals clanged cheerfully, clashing crazily near Carla's crashing crockery.
 You think you can just waltz in here and cause chaos? Well, I've got news for you."""
 
+APP_DIR = pathlib.Path(__file__).parent
+FRONTEND_FILE = APP_DIR / "frontend" / "index.html"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -228,6 +250,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # --- Request Models ---
 class SpeechRequest(BaseModel):
@@ -241,18 +264,21 @@ class SpeechRequest(BaseModel):
     cfg_value: Optional[float] = 2.0
     inference_timesteps: Optional[int] = 10
 
+
 class PlaybackRequest(SpeechRequest):
     show_progress: Optional[bool] = True
 
+
 # --- Voice Cache ---
 def load_available_voices():
-    cache_dir = "assets/caches" # Note: Your code used VOICE_CACHE_DIR, but logic used "assets/caches". Sticking to this.
+    cache_dir = "assets/caches"  # Note: Your code used VOICE_CACHE_DIR, but logic used "assets/caches". Sticking to this.
     voices = []
     if os.path.exists(cache_dir):
         for file in os.listdir(cache_dir):
             if file.endswith(".npy"):
                 voices.append(file[:-4])
     return sorted(voices)
+
 
 def load_voice_cache(voice_name: str):
     cache_path = f"assets/caches/{voice_name}.npy"
@@ -264,16 +290,28 @@ def load_voice_cache(voice_name: str):
     try:
         return np.load(cache_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load voice '{voice_name}': {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load voice '{voice_name}': {e}"
+        )
+
 
 # --- Param Validation ---
-def validate_voice_parameters(max_length: int, cfg_value: float, inference_timesteps: int):
+def validate_voice_parameters(
+    max_length: int, cfg_value: float, inference_timesteps: int
+):
     if not (0 < max_length <= 2048):
-        raise HTTPException(status_code=400, detail="max_length must be between 1 and 2048")
+        raise HTTPException(
+            status_code=400, detail="max_length must be between 1 and 2048"
+        )
     if not (0.0 <= cfg_value <= 10.0):
-        raise HTTPException(status_code=400, detail="cfg_value must be between 0.0 and 10.0")
+        raise HTTPException(
+            status_code=400, detail="cfg_value must be between 0.0 and 10.0"
+        )
     if not (0 < inference_timesteps <= 100):
-        raise HTTPException(status_code=400, detail="inference_timesteps must be between 1 and 100")
+        raise HTTPException(
+            status_code=400, detail="inference_timesteps must be between 1 and 100"
+        )
+
 
 # --- Core Generation Function (Modified) ---
 def generate_audio_chunks(
@@ -281,10 +319,10 @@ def generate_audio_chunks(
     prompt_wav_path,
     prompt_text,
     voice=None,
-    max_length=2048, # Default was 4096, but validation says 2048
+    max_length=2048,  # Default was 4096, but validation says 2048
     cfg_value=2.0,
     inference_timesteps=10,
-    cancellation_event: threading.Event = None  # <-- Accepts the per-job event
+    cancellation_event: threading.Event = None,  # <-- Accepts the per-job event
 ):
     """Generator that yields audio chunks and respects the cancellation_event"""
     import re
@@ -306,7 +344,10 @@ def generate_audio_chunks(
     else:
         if prompt_wav_path and prompt_wav_path.strip():
             if not os.path.exists(prompt_wav_path):
-                raise HTTPException(status_code=400, detail=f"Prompt WAV file not found: {prompt_wav_path}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Prompt WAV file not found: {prompt_wav_path}",
+                )
             try:
                 audio, sr = soundfile.read(prompt_wav_path)
                 if sr != 16_000:
@@ -314,14 +355,19 @@ def generate_audio_chunks(
                 if audio.ndim == 1:
                     audio = audio[None, :]
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Error loading prompt WAV: {e}")
+                raise HTTPException(
+                    status_code=400, detail=f"Error loading prompt WAV: {e}"
+                )
         else:
             audio = None
         text = prompt_text + " " + text_to_generate
 
     text = text.replace("\n", " ").strip()
     text = re.sub(r"\s+", " ", text)
-    text_token = np.array(model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)), dtype=np.int32)[None, :]
+    text_token = np.array(
+        model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
+        dtype=np.int32,
+    )[None, :]
 
     if audio is not None:
         patch_len = model.tts_model.patch_size * model.tts_model.chunk_size
@@ -350,7 +396,7 @@ def generate_audio_chunks(
                 cfg_value=cfg_value,
                 inference_timesteps=inference_timesteps,
             )
-        
+
         # Iterate and yield, checking for cancellation
         for (chunk,) in generator:
             if cancellation_event.is_set():
@@ -358,7 +404,7 @@ def generate_audio_chunks(
                 break
             audio_chunk_float32 = chunk.astype(np.float32)
             yield audio_chunk_float32
-            
+
     except GeneratorExit:
         print("Generator exited (likely due to client disconnect)")
     except Exception as e:
@@ -370,9 +416,11 @@ def generate_audio_chunks(
         cancellation_event.set()
         print("generate_audio_chunks finalizing.")
 
+
 # ===================================================================
 # 🖥️ 4. FastAPI Endpoints (Rewritten)
 # ===================================================================
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -380,17 +428,24 @@ async def startup_event():
     worker_thread = threading.Thread(target=generation_worker, daemon=True)
     worker_thread.start()
 
+
 @app.get("/", response_class=HTMLResponse)
 async def get_frontend():
     """Serves the frontend playground HTML file"""
     try:
-        async with aiofiles.open("index.html", mode="r") as f:
+        async with aiofiles.open(FRONTEND_FILE, mode="r") as f:
             content = await f.read()
         return HTMLResponse(content=content)
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Error: <code>index.html</code> not found.</h1>", status_code=404)
+        return HTMLResponse(
+            content="<h1>Error: <code>index.html</code> not found.</h1>",
+            status_code=404,
+        )
 
-async def poll_queue_for_chunks(output_queue: queue.Queue, poll_interval: float = 0.005):
+
+async def poll_queue_for_chunks(
+    output_queue: queue.Queue, poll_interval: float = 0.005
+):
     """
     Asynchronous generator that polls a thread-safe
     queue for data.
@@ -399,7 +454,7 @@ async def poll_queue_for_chunks(output_queue: queue.Queue, poll_interval: float 
         try:
             # Get item without blocking the event loop
             item = output_queue.get_nowait()
-            
+
             if item is None:
                 # Sentinel: generation is done
                 break
@@ -410,7 +465,7 @@ async def poll_queue_for_chunks(output_queue: queue.Queue, poll_interval: float 
             else:
                 # Yield the audio chunk
                 yield item
-                
+
         except queue.Empty:
             # Queue was empty, sleep asynchronously
             await asyncio.sleep(poll_interval)
@@ -422,9 +477,9 @@ async def stream_speech(request: SpeechRequest):
     global JOB_COUNTER
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
-    
+
     # 1. Create resources for this job
-    output_queue = queue.Queue(maxsize=10) # Small buffer
+    output_queue = queue.Queue(maxsize=10)  # Small buffer
     cancel_event = threading.Event()
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
@@ -459,7 +514,9 @@ async def stream_speech(request: SpeechRequest):
             # THIS IS THE MOST IMPORTANT PART
             # When the client disconnects (or stream finishes),
             # this *always* runs.
-            print(f"[Endpoint] ⏹️ Stream generator cleanup for Job {job_id}. Setting cancel event.")
+            print(
+                f"[Endpoint] ⏹️ Stream generator cleanup for Job {job_id}. Setting cancel event."
+            )
             cancel_event.set()
 
     # 4. Return the StreamingResponse
@@ -491,18 +548,20 @@ async def generate_speech(request: SpeechRequest):
         raise HTTPException(
             status_code=429, detail="Server is busy processing another request"
         )
-    
+
     # 3. Collect all chunks from the queue
     chunks = []
     try:
         # This loop will asynchronously poll the queue
         async for chunk in poll_queue_for_chunks(output_queue):
             chunks.append(chunk)
-        
+
         if not chunks:
             print(f"[Endpoint] ❌ No audio data generated for Job {job_id}.")
-            raise HTTPException(status_code=500, detail="Failed to generate audio (no data)")
-            
+            raise HTTPException(
+                status_code=500, detail="Failed to generate audio (no data)"
+            )
+
         print(f"[Endpoint] ✅ Audio collection complete for Job {job_id}.")
         audio_data = np.concatenate(chunks)
 
@@ -519,19 +578,36 @@ async def generate_speech(request: SpeechRequest):
 
     # 4. Save to temporary file
     try:
-        with tempfile.NamedTemporaryFile(suffix=f".{request.response_format}", delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(
+            suffix=f".{request.response_format}", delete=False
+        ) as tmp_file:
             if request.response_format.lower() == "pcm":
-                soundfile.write(tmp_file.name, audio_data, SAMPLE_RATE, format="RAW", subtype="PCM_16")
+                soundfile.write(
+                    tmp_file.name,
+                    audio_data,
+                    SAMPLE_RATE,
+                    format="RAW",
+                    subtype="PCM_16",
+                )
             else:
-                soundfile.write(tmp_file.name, audio_data, SAMPLE_RATE, format=request.response_format.lower())
+                soundfile.write(
+                    tmp_file.name,
+                    audio_data,
+                    SAMPLE_RATE,
+                    format=request.response_format.lower(),
+                )
             tmp_path = tmp_file.name
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write audio file: {e}")
 
     # 5. Return file response
     media_type = {
-        "wav": "audio/wav", "pcm": "audio/pcm", "mp3": "audio/mpeg",
-        "flac": "audio/flac", "opus": "audio/opus", "aac": "audio/aac",
+        "wav": "audio/wav",
+        "pcm": "audio/pcm",
+        "mp3": "audio/mpeg",
+        "flac": "audio/flac",
+        "opus": "audio/opus",
+        "aac": "audio/aac",
     }.get(request.response_format.lower(), "audio/wav")
 
     return FileResponse(
@@ -541,6 +617,7 @@ async def generate_speech(request: SpeechRequest):
         # background=lambda: os.unlink(tmp_path), # Clean up temp file
         background=BackgroundTask(os.unlink, tmp_path),
     )
+
 
 @app.post("/v1/audio/speech/playback")
 async def playback_speech(request: PlaybackRequest):
@@ -563,28 +640,36 @@ async def playback_speech(request: PlaybackRequest):
         raise HTTPException(
             status_code=429, detail="Server is busy processing another request"
         )
-    
+
     # 3. Setup progress bars
     pbar_gen = pbar_play = None
     if request.show_progress:
         initial_frames = int(30 * SAMPLE_RATE)
-        pbar_gen = tqdm(total=initial_frames, desc="📢 Generation", unit="frame", ncols=100)
-        pbar_play = tqdm(total=initial_frames, desc="🎧 Playback ", unit="frame", ncols=100)
+        pbar_gen = tqdm(
+            total=initial_frames, desc="📢 Generation", unit="frame", ncols=100
+        )
+        pbar_play = tqdm(
+            total=initial_frames, desc="🎧 Playback ", unit="frame", ncols=100
+        )
 
     generated_frames_count = 0
     played_frames_count = 0
 
     # 4. Playback loop
     try:
-        with sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+        with sd.OutputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32"
+        ) as stream:
             # This loop will asynchronously poll the queue
             async for chunk in poll_queue_for_chunks(output_queue):
                 stream.write(chunk)
-                
+
                 # Update counters and progress bars
-                generated_frames_count += len(chunk) # Note: This is a lie, it's "played"
+                generated_frames_count += len(
+                    chunk
+                )  # Note: This is a lie, it's "played"
                 played_frames_count += len(chunk)
-                
+
                 if request.show_progress:
                     pbar_gen.n = generated_frames_count
                     pbar_play.n = played_frames_count
@@ -604,17 +689,22 @@ async def playback_speech(request: PlaybackRequest):
         # Always set cancel event and close progress bars
         cancel_event.set()
         if request.show_progress:
-            if pbar_gen: pbar_gen.close()
-            if pbar_play: pbar_play.close()
+            if pbar_gen:
+                pbar_gen.close()
+            if pbar_play:
+                pbar_play.close()
         print(f"Playback finished for Job {job_id}.")
 
     duration = played_frames_count / SAMPLE_RATE
-    return JSONResponse({
-        "status": "success",
-        "message": "Audio playback completed on server",
-        "duration_seconds": round(duration, 2),
-        "frames_played": played_frames_count,
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": "Audio playback completed on server",
+            "duration_seconds": round(duration, 2),
+            "frames_played": played_frames_count,
+        }
+    )
+
 
 @app.post("/v1/audio/speech/cancel")
 async def cancel_generation():
@@ -623,16 +713,20 @@ async def cancel_generation():
         return JSONResponse(
             {"status": "success", "message": "No generation in progress"}
         )
-    
+
     try:
         print(f"[Endpoint] 🔴 Received /cancel request for Job {CURRENT_JOB.job_id}")
         CURRENT_JOB.cancel_event.set()
         return JSONResponse(
-            {"status": "success", "message": f"Cancellation signal sent to Job {CURRENT_JOB.job_id}"}
+            {
+                "status": "success",
+                "message": f"Cancellation signal sent to Job {CURRENT_JOB.job_id}",
+            }
         )
     except Exception as e:
         print(f"Error cancelling generation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cancel: {e}")
+
 
 @app.get("/voices")
 async def get_available_voices():
@@ -647,10 +741,11 @@ async def get_available_voices():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load voices: {e}")
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    is_processing = (CURRENT_JOB is not None)
+    is_processing = CURRENT_JOB is not None
     return {
         "status": "healthy",
         "is_processing": is_processing,
@@ -664,10 +759,31 @@ async def health_check():
 # 🏁 5. Server Run
 # ===================================================================
 
-if __name__ == "__main__":
+
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="OpenAI-compatible TTS Server")
+    parser.add_argument(
+        "--port", 
+        type=int, 
+        default=8000, 
+        help="Port to run the server on (default: 8000)"
+    )
+    parser.add_argument(
+        "--host", 
+        type=str, 
+        default="0.0.0.0", 
+        help="Host to bind the server to (default: 0.0.0.0)"
+    )
+    args = parser.parse_args()
+    
     print("🚀 Starting OpenAI-compatible TTS server...")
-    print("   Access the frontend playground at: http://localhost:8000")
+    print(f"   Access the frontend playground at: http://{args.host}:{args.port}")
     print("   Architecture: Single-worker thread model")
     print(f"   Available voices: {len(load_available_voices())}")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+if __name__ == "__main__":
+    main()

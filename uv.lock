@@ -1327,17 +1327,20 @@ wheels = [
 [[package]]
 name = "voxcpmane"
 version = "0.0.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
+    { name = "aiofiles" },
     { name = "coremltools" },
     { name = "einops" },
     { name = "fastapi" },
     { name = "gradio" },
+    { name = "huggingface-hub" },
     { name = "inflect" },
     { name = "numpy" },
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "soxr" },
+    { name = "tqdm" },
     { name = "transformers" },
     { name = "uvicorn" },
     { name = "wetext" },
@@ -1350,15 +1353,18 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiofiles" },
     { name = "coremltools", specifier = "==8.3.0" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "fastapi", specifier = ">=0.121.0" },
     { name = "gradio", specifier = ">=5.49.1" },
+    { name = "huggingface-hub" },
     { name = "inflect", specifier = ">=7.5.0" },
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "sounddevice", specifier = ">=0.5.3" },
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "soxr", specifier = ">=1.0.0" },
+    { name = "tqdm" },
     { name = "transformers", specifier = ">=4.57.1" },
     { name = "uvicorn", specifier = ">=0.38.0" },
     { name = "wetext", specifier = ">=0.1.0" },
