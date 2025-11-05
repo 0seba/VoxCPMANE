@@ -7,8 +7,13 @@ import sounddevice as sd
 from tqdm import tqdm
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware  # Import CORS
+from fastapi.responses import (
+    StreamingResponse,
+    FileResponse,
+    JSONResponse,
+    HTMLResponse,
+)
+from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 import soundfile
 import soxr
@@ -16,49 +21,86 @@ import coremltools as ct
 from pydantic import BaseModel
 from typing import Optional
 import aiofiles
+from huggingface_hub import snapshot_download
 
+
+REPO_ID = "seba/VoxCPM-ANE"
+
+MODEL_PATH_PREFIX = ""
+VOICE_CACHE_DIR = ""
 
 try:
     lm_length = 8
 
-    # --- IMPORTANT ---
-    # Update these paths to be correct relative to where you run the script.
-    # Using absolute paths or ensuring they are in the correct
-    # relative location (e.g., '../ne-ts/') is crucial.
-    MODEL_PATH_PREFIX = "../ne-ts/"
-    
+    print(f"🚀 Downloading/loading model files from Hugging Face Hub repo: {REPO_ID}")
+    MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
+    print(f"✅ Model files are available at: {MODEL_PATH_PREFIX}")
+
+    VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
+
     locdit_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "locdit_f16.mlmodelc")
-    projections_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "projections_1_t.mlpackage")
-    feature_encoder_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "voxcpm_feat_encoder_ane_enum_12.mlmodelc")
+    projections_mlmodel_path = os.path.join(
+        MODEL_PATH_PREFIX, "projections_1_t.mlmodelc"
+    )
+    feature_encoder_mlmodel_path = os.path.join(
+        MODEL_PATH_PREFIX, "voxcpm_feat_encoder_ane_enum_12.mlmodelc"
+    )
     fsq_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "fsq_layer.mlmodelc")
-    audio_vae_decoder_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "voxcpm_audio_vae_decoder_length_24.mlmodelc")
-    audio_vae_encoder_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "voxcpm_audio_vae_encoder_enum_length_17920.mlmodelc")
+    audio_vae_decoder_mlmodel_path = os.path.join(
+        MODEL_PATH_PREFIX, "voxcpm_audio_vae_decoder_length_24.mlmodelc"
+    )
+    audio_vae_encoder_mlmodel_path = os.path.join(
+        MODEL_PATH_PREFIX, "voxcpm_audio_vae_encoder_enum_length_17920.mlmodelc"
+    )
     base_lm_embed_tokens_path = os.path.join(MODEL_PATH_PREFIX, "base_lm_embeds.npy")
     base_lm_mf_path = os.path.join(MODEL_PATH_PREFIX, "base_lm_mf_f16.mlmodelc/")
-    residual_lm_mf_path = os.path.join(MODEL_PATH_PREFIX, "residual_lm_mf_f16.mlmodelc/")
-    
-    # Check if files exist before loading
+    residual_lm_mf_path = os.path.join(
+        MODEL_PATH_PREFIX, "residual_lm_mf_f16.mlmodelc/"
+    )
+
     required_files = [
-        locdit_mlmodel_path, projections_mlmodel_path, feature_encoder_mlmodel_path,
-        fsq_mlmodel_path, audio_vae_decoder_mlmodel_path, audio_vae_encoder_mlmodel_path,
-        base_lm_embed_tokens_path, base_lm_mf_path, residual_lm_mf_path
+        locdit_mlmodel_path,
+        projections_mlmodel_path,
+        feature_encoder_mlmodel_path,
+        fsq_mlmodel_path,
+        audio_vae_decoder_mlmodel_path,
+        audio_vae_encoder_mlmodel_path,
+        base_lm_embed_tokens_path,
+        base_lm_mf_path,
+        residual_lm_mf_path,
+        VOICE_CACHE_DIR,
     ]
-    
+
     missing_files = [f for f in required_files if not os.path.exists(f)]
     if missing_files:
-        print(f"❌ Error: Missing model files:")
+        print(f"❌ Error: Missing model files in downloaded snapshot:")
         for f in missing_files:
             print(f"  - {f}")
-        print("Please check the MODEL_PATH_PREFIX and ensure all model files are present.")
+        print(
+            f"Please check your Hugging Face repo '{REPO_ID}' and ensure all files are present."
+        )
         exit()
 
-
-    locdit_mlmodel = ct.models.CompiledMLModel(locdit_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    projections_mlmodel = ct.models.MLModel(projections_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    feature_encoder_mlmodel = ct.models.CompiledMLModel(feature_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE)
-    fsq_mlmodel = ct.models.CompiledMLModel(fsq_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
-    audio_vae_decoder_mlmodel = ct.models.CompiledMLModel(audio_vae_decoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
-    audio_vae_encoder_mlmodel = ct.models.CompiledMLModel(audio_vae_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY)
+    # --- Model Loading ---
+    print("Loading CoreML models...")
+    locdit_mlmodel = ct.models.CompiledMLModel(
+        locdit_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    projections_mlmodel = ct.models.CompiledMLModel(
+        projections_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    feature_encoder_mlmodel = ct.models.CompiledMLModel(
+        feature_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
+    )
+    fsq_mlmodel = ct.models.CompiledMLModel(
+        fsq_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
+    audio_vae_decoder_mlmodel = ct.models.CompiledMLModel(
+        audio_vae_decoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
+    audio_vae_encoder_mlmodel = ct.models.CompiledMLModel(
+        audio_vae_encoder_mlmodel_path, compute_units=ct.ComputeUnit.CPU_ONLY
+    )
     base_lm_embed_tokens = np.load(base_lm_embed_tokens_path)
 
     from src.voxcpm import VoxCPMANE
@@ -80,16 +122,21 @@ try:
         audio_vae_encoder_chunk_size=23040,
         feature_encoder_chunk_size=16,
     )
+    print("✅ Models loaded successfully.")
 
 except (FileNotFoundError, IOError) as e:
     print(f"❌ Error: Model file not found.")
     print(f"Details: {e}")
-    print("Please ensure all .mlmodelc, .mlpackage, and .npy files are in the correct location.")
+    print(
+        "Please ensure all .mlmodelc, .mlpackage, and .npy files are in the correct location."
+    )
     exit()
 except ImportError as e:
     print(f"❌ Error: Missing required Python package.")
     print(f"Details: {e}")
-    print("Please ensure you have installed all dependencies (e.g., `pip install -r requirements.txt`)")
+    print(
+        "Please ensure you have installed all dependencies (e.g., `pip install -r requirements.txt`)"
+    )
     exit()
 except Exception as e:
     print(f"❌ An unexpected error occurred during model setup: {e}")
@@ -145,60 +192,68 @@ def load_available_voices():
     """Load available voice names from the caches directory"""
     cache_dir = "assets/caches"
     voices = []
-    
+
     if os.path.exists(cache_dir):
         for file in os.listdir(cache_dir):
-            if file.endswith('.npy'):
+            if file.endswith(".npy"):
                 voice_name = file[:-4]  # Remove .npy extension
                 voices.append(voice_name)
-    
+
     return sorted(voices)
+
 
 def load_voice_cache(voice_name: str):
     """Load cached audio features for a specific voice"""
     cache_path = f"assets/caches/{voice_name}.npy"
-    
+
     if not os.path.exists(cache_path):
         raise HTTPException(
-            status_code=404, 
-            detail=f"Voice '{voice_name}' not found. Available voices: {load_available_voices()}"
+            status_code=404,
+            detail=f"Voice '{voice_name}' not found. Available voices: {load_available_voices()}",
         )
-    
+
     try:
         cache_data = np.load(cache_path)
         return cache_data
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load voice cache for '{voice_name}': {str(e)}"
+            detail=f"Failed to load voice cache for '{voice_name}': {str(e)}",
         )
 
-def validate_voice_parameters(max_length: int, cfg_value: float, inference_timesteps: int):
+
+def validate_voice_parameters(
+    max_length: int, cfg_value: float, inference_timesteps: int
+):
     """Validate generation parameters"""
     if max_length <= 0 or max_length > 2048:
         raise HTTPException(
-            status_code=400,
-            detail="max_length must be between 1 and 8192"
+            status_code=400, detail="max_length must be between 1 and 8192"
         )
-    
+
     if cfg_value < 0.0 or cfg_value > 10.0:
         raise HTTPException(
-            status_code=400,
-            detail="cfg_value must be between 0.0 and 10.0"
+            status_code=400, detail="cfg_value must be between 0.0 and 10.0"
         )
-    
+
     if inference_timesteps <= 0 or inference_timesteps > 100:
         raise HTTPException(
-            status_code=400,
-            detail="inference_timesteps must be between 1 and 100"
+            status_code=400, detail="inference_timesteps must be between 1 and 100"
         )
 
 
 # ===========================
 # Audio Generation Functions
 # ===========================
-def generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, voice=None, 
-                         max_length=4096, cfg_value=2.0, inference_timesteps=10):
+def generate_audio_chunks(
+    text_to_generate,
+    prompt_wav_path,
+    prompt_text,
+    voice=None,
+    max_length=4096,
+    cfg_value=2.0,
+    inference_timesteps=10,
+):
     """Generator that yields audio chunks during generation"""
     import re
 
@@ -208,7 +263,7 @@ def generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, voice=
     # Handle voice caching vs prompt audio
     audio_cache = None
     audio = None
-    
+
     if voice is not None:
         # Use cached voice features
         audio_cache = load_voice_cache(voice)
@@ -220,7 +275,7 @@ def generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, voice=
             if not os.path.exists(prompt_wav_path):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Prompt WAV file not found: {prompt_wav_path}"
+                    detail=f"Prompt WAV file not found: {prompt_wav_path}",
                 )
             try:
                 audio, sr = soundfile.read(prompt_wav_path)
@@ -230,15 +285,14 @@ def generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, voice=
                     audio = audio[None, :]
             except Exception as e:
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Error loading prompt WAV: {e}"
+                    status_code=400, detail=f"Error loading prompt WAV: {e}"
                 )
         else:
             # No prompt path provided, use fallback silence
             audio = np.zeros((1, 16000), dtype=np.float32)
-        
+
         text = prompt_text + " " + text_to_generate
-    
+
     # Normalize text
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
@@ -295,12 +349,26 @@ def generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, voice=
         raise
 
 
-def generate_complete_audio(text_to_generate, prompt_wav_path, prompt_text, voice=None, 
-                           max_length=4096, cfg_value=2.0, inference_timesteps=10):
+def generate_complete_audio(
+    text_to_generate,
+    prompt_wav_path,
+    prompt_text,
+    voice=None,
+    max_length=4096,
+    cfg_value=2.0,
+    inference_timesteps=10,
+):
     """Generates complete audio and returns as numpy array"""
     chunks = []
-    for chunk in generate_audio_chunks(text_to_generate, prompt_wav_path, prompt_text, 
-                                     voice, max_length, cfg_value, inference_timesteps):
+    for chunk in generate_audio_chunks(
+        text_to_generate,
+        prompt_wav_path,
+        prompt_text,
+        voice,
+        max_length,
+        cfg_value,
+        inference_timesteps,
+    ):
         chunks.append(chunk)
 
     if chunks:
@@ -311,6 +379,7 @@ def generate_complete_audio(text_to_generate, prompt_wav_path, prompt_text, voic
 # ===========================
 # Server Endpoints
 # ===========================
+
 
 @app.get("/", response_class=HTMLResponse)
 async def get_frontend():
@@ -324,6 +393,8 @@ async def get_frontend():
             content="<h1>Error</h1><p><code>index.html</code> not found. Please make sure it's in the same directory as this Python script.</p>",
             status_code=404,
         )
+
+
 # -----------------------------------------
 
 
@@ -344,13 +415,13 @@ async def stream_speech(request: SpeechRequest):
         def audio_stream():
             try:
                 for chunk in generate_audio_chunks(
-                    request.input, 
-                    request.prompt_wav_path, 
+                    request.input,
+                    request.prompt_wav_path,
                     request.prompt_text,
                     voice=request.voice,
                     max_length=request.max_length,
                     cfg_value=request.cfg_value,
-                    inference_timesteps=request.inference_timesteps
+                    inference_timesteps=request.inference_timesteps,
                 ):
                     # Convert to 16-bit PCM for streaming
                     # This is what the frontend AudioContext will expect
@@ -374,9 +445,7 @@ async def stream_speech(request: SpeechRequest):
         return StreamingResponse(
             audio_stream(),
             media_type="application/octet-stream",
-            headers={
-                "X-Sample-Rate": str(SAMPLE_RATE) # Send sample rate as a header
-            },
+            headers={"X-Sample-Rate": str(SAMPLE_RATE)},  # Send sample rate as a header
         )
 
     except Exception as e:
@@ -402,13 +471,13 @@ async def generate_speech(request: SpeechRequest):
     try:
         # Generate complete audio
         audio_data = generate_complete_audio(
-            request.input, 
-            request.prompt_wav_path, 
+            request.input,
+            request.prompt_wav_path,
             request.prompt_text,
             voice=request.voice,
             max_length=request.max_length,
             cfg_value=request.cfg_value,
-            inference_timesteps=request.inference_timesteps
+            inference_timesteps=request.inference_timesteps,
         )
 
         if audio_data is None:
@@ -420,7 +489,13 @@ async def generate_speech(request: SpeechRequest):
         ) as tmp_file:
             if request.response_format.lower() == "pcm":
                 # Raw PCM data (as float32, which is soundfile's default)
-                soundfile.write(tmp_file.name, audio_data, SAMPLE_RATE, format='RAW', subtype='PCM_16')
+                soundfile.write(
+                    tmp_file.name,
+                    audio_data,
+                    SAMPLE_RATE,
+                    format="RAW",
+                    subtype="PCM_16",
+                )
             else:
                 # Use soundfile for other formats
                 soundfile.write(
@@ -485,20 +560,20 @@ async def playback_speech(request: PlaybackRequest, req: Request):
             nonlocal generated_frames_count, generation_complete
             try:
                 for chunk in generate_audio_chunks(
-                    request.input, 
-                    request.prompt_wav_path, 
+                    request.input,
+                    request.prompt_wav_path,
                     request.prompt_text,
                     voice=request.voice,
                     max_length=request.max_length,
                     cfg_value=request.cfg_value,
-                    inference_timesteps=request.inference_timesteps
+                    inference_timesteps=request.inference_timesteps,
                 ):
                     audio_queue.put(chunk)
                     with count_lock:
                         generated_frames_count += len(chunk)
             except Exception as e:
                 print(f"Error in generation_thread: {e}")
-                audio_queue.put(None) # Ensure sentinel is put on error
+                audio_queue.put(None)  # Ensure sentinel is put on error
             finally:
                 with count_lock:
                     generation_complete = True
@@ -529,7 +604,9 @@ async def playback_speech(request: PlaybackRequest, req: Request):
 
         # Playback loop
         try:
-            with sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32') as stream:
+            with sd.OutputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="float32"
+            ) as stream:
                 while True:
                     chunk = audio_queue.get()
                     if chunk is None:  # End of generation
@@ -569,7 +646,7 @@ async def playback_speech(request: PlaybackRequest, req: Request):
                 if final_gen_frames > 0:
                     pbar_gen.total = final_gen_frames
                     pbar_play.total = final_gen_frames
-                
+
                 pbar_gen.refresh()
                 pbar_play.refresh()
                 pbar_gen.close()
@@ -615,37 +692,37 @@ async def playback_speech(request: PlaybackRequest, req: Request):
 async def cancel_generation():
     """Cancel the current audio generation"""
     global current_generation_task, is_processing
-    
+
     if not is_processing:
-        return JSONResponse({
-            "status": "success",
-            "message": "No generation in progress"
-        })
-    
+        return JSONResponse(
+            {"status": "success", "message": "No generation in progress"}
+        )
+
     try:
         # Set the cancellation event to signal ongoing generation to stop
         cancellation_event.set()
-        
+
         # Release the lock immediately
         if request_lock.locked():
             request_lock.release()
-        
+
         is_processing = False
         current_generation_task = None
-        
+
         print("Generation cancelled by user, lock released.")
-        
+
         # Reset the cancellation event after a short delay to allow new generations
         threading.Timer(1.0, lambda: cancellation_event.clear()).start()
-        
-        return JSONResponse({
-            "status": "success",
-            "message": "Audio generation cancelled successfully"
-        })
-        
+
+        return JSONResponse(
+            {"status": "success", "message": "Audio generation cancelled successfully"}
+        )
+
     except Exception as e:
         print(f"Error cancelling generation: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to cancel generation: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to cancel generation: {str(e)}"
+        )
 
 
 @app.get("/voices")
@@ -656,7 +733,7 @@ async def get_available_voices():
         return {
             "voices": voices,
             "count": len(voices),
-            "cache_directory": "assets/caches"
+            "cache_directory": "assets/caches",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load voices: {str(e)}")
@@ -670,7 +747,7 @@ async def health_check():
         "is_processing": is_processing,
         "sample_rate": SAMPLE_RATE,
         "model": "voxcpm-0.5b",
-        "available_voices": len(load_available_voices())
+        "available_voices": len(load_available_voices()),
     }
 
 
@@ -689,5 +766,7 @@ if __name__ == "__main__":
     print("💡 New features:")
     print("  - Voice caching: Use 'voice' parameter to select cached voices")
     print("  - Generation parameters: max_length, cfg_value, inference_timesteps")
-    print("  - Lock release on stop: Fixed issue where locks weren't released when stopping playback")
+    print(
+        "  - Lock release on stop: Fixed issue where locks weren't released when stopping playback"
+    )
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
