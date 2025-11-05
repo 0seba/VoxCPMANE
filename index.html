@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ANE VoxCPM TTS Playground</title>
-    <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Simple spinner animation */
@@ -25,12 +24,9 @@
             </h1>
         </header>
 
-        <!-- Status Message -->
         <div id="status-message" class="hidden p-4 rounded-lg mb-6 text-center"></div>
 
-        <!-- TTS Form -->
         <form id="tts-form" class="space-y-6 bg-gray-800 p-6 rounded-xl shadow-2xl">
-            <!-- Text to Generate -->
             <div>
                 <label for="text-input" class="block text-sm font-medium text-gray-300 mb-2">
                     Text to Generate
@@ -40,7 +36,6 @@ Cindy's circular cymbals clanged cheerfully, clashing crazily near Carla's crash
 You think you can just waltz in here and cause chaos? Well, I've got news for you.</textarea>
             </div>
 
-            <!-- Prompt Text -->
             <div>
                 <label for="prompt-text" class="block text-sm font-medium text-gray-300 mb-2">
                     Prompt Text
@@ -48,7 +43,6 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 <textarea id="prompt-text" rows="2" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Not required if using a provided voice">Get in line troublemakers, and I'll take care of you.</textarea>
             </div>
 
-            <!-- Voice Selection -->
             <div>
                 <label for="voice-select" class="block text-sm font-medium text-gray-300 mb-2">
                     Voice Selection (Optional)
@@ -59,15 +53,13 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 <div id="voice-status" class="mt-2 text-sm text-gray-400"></div>
             </div>
 
-            <!-- Prompt WAV Path -->
             <div id="prompt-section">
                 <label for="prompt-wav-path" class="block text-sm font-medium text-gray-300 mb-2">
-                    Prompt WAV Path (on server)
+                    Prompt WAV Path
                 </label>
                 <input type="text" id="prompt-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
             </div>
 
-            <!-- Generation Parameters -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                     <label for="max-length" class="block text-sm font-medium text-gray-300 mb-2">
@@ -92,22 +84,24 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 </div>
             </div>
 
-            <!-- Buttons -->
             <div class="flex flex-col sm:flex-row gap-4">
                 <button type="submit" id="play-button" class="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:from-purple-700 hover:to-pink-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
-                    <!-- Play Icon -->
                     <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
                     <span id="play-button-text">Generate & Play</span>
-                    <!-- Spinner (hidden by default) -->
                     <div id="spinner" class="hidden spinner w-5 h-5 border-t-2 border-b-2 border-white rounded-full"></div>
                 </button>
+
+                <button type="button" id="generate-full-button" class="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-blue-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 9.293a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"></path></svg>
+                    <span id="generate-full-button-text">Generate Full Audio</span>
+                    <div id="generate-full-spinner" class="hidden spinner w-5 h-5 border-t-2 border-b-2 border-white rounded-full"></div>
+                </button>
                 <button type="button" id="stop-button" class="flex-1 bg-gray-600 text-gray-200 font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-gray-500 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-                    Stop Playback
+                    Stop Generation
                 </button>
             </div>
         </form>
         
-        <!-- NEW: Audio Player (hidden by default) -->
         <div id="audio-player-container" class="hidden mt-6 bg-gray-800 p-4 rounded-xl shadow-2xl">
             <label class="block text-sm font-medium text-gray-300 mb-3">
                 Full Audio Playback
@@ -130,19 +124,25 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const promptTextInput = document.getElementById('prompt-text');
         const promptWavPathInput = document.getElementById('prompt-wav-path');
         
-        // --- NEW: Voice Selection Elements ---
+        // --- Voice Selection Elements ---
         const voiceSelect = document.getElementById('voice-select');
         const voiceStatus = document.getElementById('voice-status');
         const promptSection = document.getElementById('prompt-section');
         
-        // --- NEW: Parameter Elements ---
+        // --- Parameter Elements ---
         const maxLengthInput = document.getElementById('max-length');
         const cfgValueInput = document.getElementById('cfg-value');
         const inferenceTimestepsInput = document.getElementById('inference-timesteps');
         
-        // --- NEW: Audio Player Elements ---
+        // --- Audio Player Elements ---
         const audioPlayerContainer = document.getElementById('audio-player-container');
         const audioPlayer = document.getElementById('audio-player');
+        
+        // === NEW: Full Generation Button Elements ===
+        const generateFullButton = document.getElementById('generate-full-button');
+        const generateFullButtonText = document.getElementById('generate-full-button-text');
+        const generateFullSpinner = document.getElementById('generate-full-spinner');
+        // === END NEW ===
 
         // --- AudioContext Variables ---
         let audioContext;
@@ -151,10 +151,10 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         let isPlaying = false;
         let sampleRate = 16000; // Default, will try to get from header
         
-        // --- NEW: Array to store audio chunks for final playback ---
+        // --- Array to store audio chunks for final playback ---
         let audioChunks = [];
 
-        // --- NEW: Load available voices on page load ---
+        // --- Load available voices on page load ---
         async function loadAvailableVoices() {
             try {
                 const response = await fetch('/voices');
@@ -181,7 +181,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
         }
 
-        // --- NEW: Handle voice selection changes ---
+        // --- Handle voice selection changes ---
         voiceSelect.addEventListener('change', (event) => {
             const selectedVoice = event.target.value;
             if (selectedVoice) {
@@ -222,26 +222,48 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         function setPlayingState(playing) {
             isPlaying = playing;
             if (playing) {
+                // State for *streaming*
                 playButton.disabled = true;
+                generateFullButton.disabled = true; // --- MODIFIED ---
                 stopButton.disabled = false;
                 spinner.classList.remove('hidden');
                 playButtonText.textContent = 'Generating...';
             } else {
-                // This state is for "finished" or "stopped"
+                // State for "idle" / "finished" / "stopped"
                 playButton.disabled = false;
+                generateFullButton.disabled = false; // --- MODIFIED ---
                 stopButton.disabled = true;
                 spinner.classList.add('hidden');
                 playButtonText.textContent = 'Generate & Play';
+                
+                // --- NEW: Also reset full gen button ---
+                generateFullSpinner.classList.add('hidden');
+                generateFullButtonText.textContent = 'Generate Full Audio';
+                
                 streamReader = null; // Clear reader
-                // We no longer close the audioContext here
             }
         }
+        
+        // === NEW: State function for full generation ===
+        function setFullGeneratingState(generating) {
+            if (generating) {
+                // State for *full generation*
+                playButton.disabled = true;
+                generateFullButton.disabled = true;
+                stopButton.disabled = false; // Stop button is active
+                generateFullSpinner.classList.remove('hidden');
+                generateFullButtonText.textContent = 'Generating...';
+            } else {
+                // Use the master reset function
+                setPlayingState(false);
+            }
+        }
+        // === END NEW ===
 
-        // --- Form Submit Handler ---
+        // --- Form Submit Handler (Streaming) ---
         ttsForm.addEventListener('submit', async (event) => {
             event.preventDefault();
 
-            // --- MODIFIED ---
             // Close any existing context from a previous run
             if (audioContext && audioContext.state !== 'closed') {
                 audioContext.close().then(() => console.log('Previous AudioContext closed.'));
@@ -253,7 +275,6 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
             audioPlayer.src = '';
             audioChunks = [];
-            // --- END MODIFIED ---
             
             const text = textInput.value;
             if (!text.trim()) {
@@ -337,6 +358,102 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
         });
 
+        // === NEW: Full Generation Button Handler ===
+        generateFullButton.addEventListener('click', async (event) => {
+            event.preventDefault();
+            
+            // --- Clear old audio ---
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close().then(() => console.log('Previous AudioContext closed.'));
+            }
+            audioPlayerContainer.classList.add('hidden');
+            if (audioPlayer.src) {
+                URL.revokeObjectURL(audioPlayer.src); // Revoke old URL
+            }
+            audioPlayer.src = '';
+            audioChunks = []; // Clear streaming chunks too
+            
+            const text = textInput.value;
+            if (!text.trim()) {
+                showStatus('Please enter some text to generate.', 'error');
+                return;
+            }
+
+            hideStatus();
+            setFullGeneratingState(true); // --- Use new state function ---
+
+            try {
+                // Build request object (same as streaming)
+                const requestBody = {
+                    input: text,
+                    response_format: 'wav', // Request a common format
+                    max_length: parseInt(maxLengthInput.value),
+                    cfg_value: parseFloat(cfgValueInput.value),
+                    inference_timesteps: parseInt(inferenceTimestepsInput.value)
+                };
+
+                const selectedVoice = voiceSelect.value;
+                if (selectedVoice) {
+                    requestBody.voice = selectedVoice;
+                } else {
+                    requestBody.prompt_wav_path = promptWavPathInput.value;
+                    requestBody.prompt_text = promptTextInput.value;
+                }
+
+                const response = await fetch('/v1/audio/speech', { // --- Call full endpoint ---
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'audio/wav', // We'll ask for WAV
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    // Try to parse JSON error, fall back to status text
+                    let errorMsg;
+                    try {
+                        const errorBody = await response.json();
+                        errorMsg = errorBody.detail;
+                    } catch (e) {
+                        errorMsg = response.statusText;
+                    }
+                    throw new Error(errorMsg || `Server error: ${response.status}`);
+                }
+
+                // Get the audio file as a Blob
+                const audioBlob = await response.blob();
+                
+                // Check if blob is empty or has error type
+                if (audioBlob.size === 0) {
+                    throw new Error('Received empty audio file from server.');
+                }
+                
+                if (audioBlob.type === 'application/json') {
+                     throw new Error('Server returned an error. Check server logs.');
+                }
+
+                // Create an Object URL and set it to the player
+                const audioUrl = URL.createObjectURL(audioBlob);
+                audioPlayer.src = audioUrl;
+                audioPlayerContainer.classList.remove('hidden');
+                
+                showStatus('Full audio generation successful.', 'success');
+                setFullGeneratingState(false); // Reset UI
+
+            } catch (error) {
+                console.error('Full generation error:', error);
+                // If the fetch fails (e.g., server cancelled), this catch block will run.
+                // We show the error, unless the user manually clicked stop
+                // (in which case the stop handler already showed a message).
+                if (isPlaying) { // isPlaying is a proxy for "was a job running"
+                     showStatus(`Error: ${error.message}`, 'error');
+                }
+                setFullGeneratingState(false); // Reset UI on error
+            }
+        });
+        // === END NEW ===
+
         // --- Stop Button Handler ---
         stopButton.addEventListener('click', async () => {
             // Cancel the stream reader first
@@ -372,14 +489,9 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
             
             setPlayingState(false);
-            showStatus('Playback stopped by user.', 'info');
+            showStatus('Generation/Playback stopped by user.', 'info');
             
-            // --- NEW: Hide player on manual stop ---
-            audioPlayerContainer.classList.add('hidden');
-            if (audioPlayer.src) {
-                URL.revokeObjectURL(audioPlayer.src);
-            }
-            audioPlayer.src = '';
+            // --- MODIFIED: Player is no longer hidden on stop ---
         });
 
         // --- Core Stream Processing Function ---
@@ -490,6 +602,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             } catch (error) {
                 if (error.name === 'AbortError' || (error.message && error.message.includes('User stopped'))) {
                     console.log('Stream reading cancelled by user.');
+                    // --- MODIFIED: Build audio from partial chunks ---
+                    buildFinalAudio();
                 } else {
                     console.error('Error reading stream:', error);
                     showStatus(`Stream error: ${error.message}`, 'error');
@@ -501,16 +615,14 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
         }
         
-        // --- NEW: Function to build the final audio player source ---
+        // --- Function to build the final audio player source ---
         function buildFinalAudio() {
-            // --- MODIFIED: Removed audioContext check ---
-            // This function relies on OfflineAudioContext, 
-            // so it doesn't need the main one to be open.
+            // This function can be called even if the main context is closed,
+            // as it uses an OfflineAudioContext.
             if (!audioChunks.length) { 
                 console.log('No audio chunks to build final audio.');
                 return;
             }
-            // --- END MODIFIED ---
 
             try {
                 const totalSamples = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
@@ -551,7 +663,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
         }
         
-        // --- NEW: Function to convert an AudioBuffer to a WAV file (Blob) ---
+        // --- Function to convert an AudioBuffer to a WAV file (Blob) ---
         function bufferToWave(audioBuffer) {
             const numOfChan = audioBuffer.numberOfChannels;
             const sampleRate = audioBuffer.sampleRate;

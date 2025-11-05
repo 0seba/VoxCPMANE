@@ -924,7 +924,7 @@ class VoxCPMModelANE:
         None,
         None,
     ]:
-        assert (audio is not None) or (audio_cache is not None)
+        # assert (audio is not None) or (audio_cache is not None)
 
         generate_start_time = time.time()
         streaming = True
