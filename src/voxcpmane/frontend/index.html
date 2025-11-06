@@ -27,6 +27,7 @@
         <div id="status-message" class="hidden p-4 rounded-lg mb-6 text-center"></div>
 
         <form id="tts-form" class="space-y-6 bg-gray-800 p-6 rounded-xl shadow-2xl">
+            
             <div>
                 <label for="text-input" class="block text-sm font-medium text-gray-300 mb-2">
                     Text to Generate
@@ -37,15 +38,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             </div>
 
             <div>
-                <label for="prompt-text" class="block text-sm font-medium text-gray-300 mb-2">
-                    Prompt Text
-                </label>
-                <textarea id="prompt-text" rows="2" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Not required if using a provided voice">Get in line troublemakers, and I'll take care of you.</textarea>
-            </div>
-
-            <div>
-                <label for="voice-select" class="block text-sm font-medium text-gray-300 mb-2">
-                    Voice Selection (Optional)
+                <label for="voice-select" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                    <span>Voice Selection (Optional)</span>
+                    <a href="https://gregr.org/tts-samples/" target="_blank" rel="noopener noreferrer" class="ml-2 text-sm text-purple-400 hover:text-purple-300 transition-colors">
+                        (See Samples)
+                    </a>
                 </label>
                 <select id="voice-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
                     <option value="">Use Prompt Audio</option>
@@ -54,16 +51,36 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             </div>
 
             <div id="prompt-section">
-                <label for="prompt-wav-path" class="block text-sm font-medium text-gray-300 mb-2">
-                    Prompt WAV Path
+                <label for="prompt-wav-path" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                    <span>Prompt WAV Path (Optional for Voice Cloning)</span>
+                    <div class="relative group ml-2">
+                        <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
+                        <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
+                            Random sounding voice if unspecified.
+                        </div>
+                    </div>
                 </label>
                 <input type="text" id="prompt-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+            </div>
+            
+            <div id="prompt-text-section">
+                <label for="prompt-text" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                    <span>Prompt Text (Required when using prompt WAV)</span>
+                    
+                    <div class="relative group ml-2">
+                        <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
+                        <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
+                            This text is transcribed from the 'Prompt WAV' and is used to condition the model on the voice's acoustic properties. It <strong>must</strong> be an accurate transcription of the prompt audio.
+                        </div>
+                    </div>
+                    </label>
+                <textarea id="prompt-text" rows="2" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Not required if using a provided voice"></textarea>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                     <label for="max-length" class="block text-sm font-medium text-gray-300 mb-2">
-                        Max Length
+                        Max Length (0.04s per unit)
                     </label>
                     <input type="number" id="max-length" value="2048" min="1" max="2048" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
                     <div class="mt-1 text-xs text-gray-500">Maximum generated sequence length (1-2048)</div>
@@ -76,9 +93,16 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     <div class="mt-1 text-xs text-gray-500">Classifier-free guidance value (0.0-10.0)</div>
                 </div>
                 <div>
-                    <label for="inference-timesteps" class="block text-sm font-medium text-gray-300 mb-2">
-                        Inference Timesteps
-                    </label>
+                    <label for="inference-timesteps" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                        <span>Inference Timesteps</span>
+                        
+                        <div class="relative group ml-2">
+                            <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
+                            <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
+                                Controls the number of diffusion steps. A higher number (e.g., 20) is slower but may increase quality. A lower number (e.g., 5-10) is faster. This model works well with 10.
+                            </div>
+                        </div>
+                        </label>
                     <input type="number" id="inference-timesteps" value="10" min="1" max="100" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
                     <div class="mt-1 text-xs text-gray-500">Number of inference steps (1-100)</div>
                 </div>
@@ -128,6 +152,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const voiceSelect = document.getElementById('voice-select');
         const voiceStatus = document.getElementById('voice-status');
         const promptSection = document.getElementById('prompt-section');
+        // --- NEW: Get the prompt text section ---
+        const promptTextSection = document.getElementById('prompt-text-section');
         
         // --- Parameter Elements ---
         const maxLengthInput = document.getElementById('max-length');
@@ -185,13 +211,15 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         voiceSelect.addEventListener('change', (event) => {
             const selectedVoice = event.target.value;
             if (selectedVoice) {
-                // Hide prompt section when using cached voice
+                // --- MODIFIED: Hide both prompt sections ---
                 promptSection.style.display = 'none';
+                promptTextSection.style.display = 'none';
                 voiceStatus.textContent = `Using cached voice: ${selectedVoice}`;
                 voiceStatus.className = 'mt-2 text-sm text-blue-400';
             } else {
-                // Show prompt section when not using cached voice
+                // --- MODIFIED: Show both prompt sections ---
                 promptSection.style.display = 'block';
+                promptTextSection.style.display = 'block';
                 voiceStatus.textContent = 'Using prompt audio';
                 voiceStatus.className = 'mt-2 text-sm text-gray-400';
             }
