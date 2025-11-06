@@ -63,15 +63,15 @@ All TTS endpoints accept the following request parameters:
 
 ```json
 {
-  "model": "voxcpm-0.5b",           # Model identifier (fixed)
-  "input": "Text to synthesize",     # Required: Text to generate speech for
-  "voice": "voice_name",            # Optional: Use cached voice
-  "prompt_wav_path": "/path/to/audio.wav",  # Optional: Path to prompt audio file
-  "prompt_text": "Transcription of prompt audio",  # Optional: Text matching prompt audio
-  "response_format": "wav",         # Optional: Audio format (wav, mp3, flac, opus, aac, pcm)
-  "max_length": 2048,               # Optional: Max generated sequence length (1-2048)
-  "cfg_value": 2.0,                 # Optional: Classifier-free guidance (0.0-10.0)
-  "inference_timesteps": 10         # Optional: Diffusion steps (1-100)
+  "model": "voxcpm-0.5b",           // Model identifier (fixed)
+  "input": "Text to synthesize",     // Required: Text to generate speech for
+  "voice": "voice_name",            // Optional: Use cached voice
+  "prompt_wav_path": "/path/to/audio.wav",  // Optional: Path to prompt audio file
+  "prompt_text": "Transcription of prompt audio",  // Optional: Text matching prompt audio
+  "response_format": "wav",         // Optional: Audio format (wav, mp3, flac, opus, aac, pcm)
+  "max_length": 2048,               // Optional: Max generated sequence length (1-2048)
+  "cfg_value": 2.0,                 // Optional: Classifier-free guidance (0.0-10.0)
+  "inference_timesteps": 10         // Optional: Diffusion steps (1-100)
 }
 ```
 
