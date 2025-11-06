@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import traceback
 import queue
 import numpy as np
 import sounddevice as sd
@@ -259,7 +260,7 @@ class SpeechRequest(BaseModel):
     voice: Optional[str] = None
     response_format: Optional[str] = "wav"
     prompt_wav_path: Optional[str] = None
-    prompt_text: Optional[str] = "Get in line troublemakers, and I'll take care of you."
+    prompt_text: Optional[str] = ""
     max_length: Optional[int] = 2048
     cfg_value: Optional[float] = 2.0
     inference_timesteps: Optional[int] = 10
@@ -479,7 +480,7 @@ async def stream_speech(request: SpeechRequest):
     job_id = JOB_COUNTER
 
     # 1. Create resources for this job
-    output_queue = queue.Queue(maxsize=10)  # Small buffer
+    output_queue = queue.Queue(maxsize=1024)  # Small buffer
     cancel_event = threading.Event()
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
@@ -527,183 +528,155 @@ async def stream_speech(request: SpeechRequest):
     )
 
 
-@app.post("/v1/audio/speech")
-async def generate_speech(request: SpeechRequest):
-    """OpenAI-compatible TTS endpoint that returns complete audio"""
-    global JOB_COUNTER
-    JOB_COUNTER += 1
-    job_id = JOB_COUNTER
-
-    # 1. Create resources for this job
-    output_queue = queue.Queue()
-    cancel_event = threading.Event()
-    job = GenerationJob(request, output_queue, cancel_event, job_id)
-
-    # 2. Try to queue the job
-    try:
-        GENERATION_QUEUE.put_nowait(job)
-        print(f"[Endpoint] ➡️ Queued Job {job_id} for file generation.")
-    except queue.Full:
-        print(f"[Endpoint] 🚦 Queue is full. Rejecting Job {job_id}.")
-        raise HTTPException(
-            status_code=429, detail="Server is busy processing another request"
-        )
-
-    # 3. Collect all chunks from the queue
-    chunks = []
-    try:
-        # This loop will asynchronously poll the queue
-        async for chunk in poll_queue_for_chunks(output_queue):
-            chunks.append(chunk)
-
-        if not chunks:
-            print(f"[Endpoint] ❌ No audio data generated for Job {job_id}.")
-            raise HTTPException(
-                status_code=500, detail="Failed to generate audio (no data)"
-            )
-
-        print(f"[Endpoint] ✅ Audio collection complete for Job {job_id}.")
-        audio_data = np.concatenate(chunks)
-
-    except Exception as e:
-        print(f"[Endpoint] ❌ Error collecting audio for Job {job_id}: {e}")
-        # This will catch errors from the worker (e.g., bad voice)
-        # and re-raise them as HTTPExceptions
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
-    finally:
-        # Ensure we cancel if an error happened during collection
-        cancel_event.set()
-
-    # 4. Save to temporary file
-    try:
-        with tempfile.NamedTemporaryFile(
-            suffix=f".{request.response_format}", delete=False
-        ) as tmp_file:
-            if request.response_format.lower() == "pcm":
-                soundfile.write(
-                    tmp_file.name,
-                    audio_data,
-                    SAMPLE_RATE,
-                    format="RAW",
-                    subtype="PCM_16",
-                )
-            else:
-                soundfile.write(
-                    tmp_file.name,
-                    audio_data,
-                    SAMPLE_RATE,
-                    format=request.response_format.lower(),
-                )
-            tmp_path = tmp_file.name
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write audio file: {e}")
-
-    # 5. Return file response
-    media_type = {
-        "wav": "audio/wav",
-        "pcm": "audio/pcm",
-        "mp3": "audio/mpeg",
-        "flac": "audio/flac",
-        "opus": "audio/opus",
-        "aac": "audio/aac",
-    }.get(request.response_format.lower(), "audio/wav")
-
-    return FileResponse(
-        tmp_path,
-        media_type=media_type,
-        filename=f"speech.{request.response_format}",
-        # background=lambda: os.unlink(tmp_path), # Clean up temp file
-        background=BackgroundTask(os.unlink, tmp_path),
-    )
-
-
 @app.post("/v1/audio/speech/playback")
 async def playback_speech(request: PlaybackRequest):
-    """Endpoint that plays audio on the server with progress bars"""
-    global JOB_COUNTER
+    """
+    Endpoint that plays audio on the server *as it is generated* (streaming)
+    and waits for the entire audio to be played before returning.
+    """
+    global JOB_COUNTER, CURRENT_JOB
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
 
+    print(f"[Playback Endpoint] 🎵 Starting playback request for Job {job_id}")
+
     # 1. Create resources for this job
-    output_queue = queue.Queue(maxsize=10)
+    output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
     # 2. Try to queue the job
     try:
         GENERATION_QUEUE.put_nowait(job)
-        print(f"[Endpoint] ➡️ Queued Job {job_id} for server playback.")
+        CURRENT_JOB = job  # Set this so /cancel can find it
+        print(f"[Playback Endpoint] ➡️ Queued Job {job_id} for playback.")
     except queue.Full:
-        print(f"[Endpoint] 🚦 Queue is full. Rejecting Job {job_id}.")
+        print(f"[Playback Endpoint] 🚦 Queue is full. Rejecting Job {job_id}.")
         raise HTTPException(
             status_code=429, detail="Server is busy processing another request"
         )
 
-    # 3. Setup progress bars
-    pbar_gen = pbar_play = None
-    if request.show_progress:
-        initial_frames = int(30 * SAMPLE_RATE)
-        pbar_gen = tqdm(
-            total=initial_frames, desc="📢 Generation", unit="frame", ncols=100
-        )
-        pbar_play = tqdm(
-            total=initial_frames, desc="🎧 Playback ", unit="frame", ncols=100
-        )
+    client_disconnected = False
+    playback_start_time = time.time()
+    TIMEOUT_SECONDS = 300  # 5 minute timeout
 
-    generated_frames_count = 0
-    played_frames_count = 0
-
-    # 4. Playback loop
+    # 3. Play audio chunks as they arrive
     try:
+        # Verify audio device availability
+        if not sd.query_devices():
+            raise HTTPException(
+                status_code=500, detail="No audio output devices available"
+            )
+
+        chunks = poll_queue_for_chunks(output_queue)
+
+        # Progress bar (optional)
+        pbar = None
+        # if request.show_progress:
+        #     pbar = tqdm(desc=f"Job {job_id}: Playing audio", unit="chunk")
+
+        chunk_count = 0
+        last_chunk = None
+
+        # Use context manager for proper stream lifecycle
         with sd.OutputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="float32"
+            samplerate=SAMPLE_RATE,
+            channels=1,  # Mono
+            dtype=np.float32,
+            latency="low",  # Low latency for real-time playback
+            # IMPORTANT: blocksize should be smaller than chunk size for smooth playback
+            blocksize=1024,  # Adjust based on your typical chunk size
         ) as stream:
-            # This loop will asynchronously poll the queue
-            async for chunk in poll_queue_for_chunks(output_queue):
-                stream.write(chunk)
 
-                # Update counters and progress bars
-                generated_frames_count += len(
-                    chunk
-                )  # Note: This is a lie, it's "played"
-                played_frames_count += len(chunk)
+            # Process all chunks
+            async for chunk in chunks:
+                # Timeout check
+                elapsed = time.time() - playback_start_time
+                if elapsed > TIMEOUT_SECONDS:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Playback timeout after {TIMEOUT_SECONDS} seconds",
+                    )
 
-                if request.show_progress:
-                    pbar_gen.n = generated_frames_count
-                    pbar_play.n = played_frames_count
-                    if generated_frames_count >= pbar_gen.total:
-                        new_total = int(generated_frames_count * 1.5)
-                        pbar_gen.total = new_total
-                        pbar_play.total = new_total
-                    pbar_gen.refresh()
-                    pbar_play.refresh()
+                chunk_count += 1
+                last_chunk = chunk  # Keep reference to the last chunk
 
+                if pbar:
+                    pbar.update(1)
+
+                # Write chunk in a thread to avoid blocking the event loop
+                await asyncio.to_thread(stream.write, chunk)
+
+            # CRITICAL FIX: Apply fade-out to prevent click/pop at end
+            if last_chunk is not None and len(last_chunk) > 100:
+                # Take the last 50ms of audio and fade it to zero
+                fade_duration_ms = 50
+                fade_samples = int(SAMPLE_RATE * fade_duration_ms / 1000)
+                fade_samples = min(fade_samples, len(last_chunk))
+
+                # Create a copy to avoid modifying the original
+                faded_chunk = last_chunk[-fade_samples:].copy()
+                fade_window = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+                faded_chunk *= fade_window
+
+                # Write the faded tail (this replaces the original tail)
+                # We write it separately to ensure it's the very last thing played
+                await asyncio.to_thread(stream.write, faded_chunk)
+
+            # Optional: add a tiny silence buffer to ensure clean stop
+            # This gives the hardware time to finish the fade
+            silence_buffer = np.zeros(128, dtype=np.float32)  # ~8ms of silence
+            await asyncio.to_thread(stream.write, silence_buffer)
+
+        # Close progress bar
+        if pbar:
+            pbar.close()
+
+        # 5. Validate and finalize
+        if chunk_count == 0:
+            raise HTTPException(
+                status_code=500, detail="Failed to generate audio (no chunks)"
+            )
+
+        total_duration = time.time() - playback_start_time
+        print(
+            f"[Playback Endpoint] ✅ Playback complete for Job {job_id} ({chunk_count} chunks, {total_duration:.2f}s)."
+        )
+
+        # 6. Return success response only after full playback
+        status = "cancelled" if client_disconnected else "success"
+        message = f"Audio playback {'cancelled' if client_disconnected else 'completed'} for Job {job_id}"
+
+        return JSONResponse(
+            {
+                "status": status,
+                "message": message,
+                "job_id": job_id,
+                "chunks_played": chunk_count,
+                "duration_seconds": round(total_duration, 2),
+            }
+        )
+
+    except asyncio.CancelledError:
+        client_disconnected = True
+        print(f"[Playback Endpoint] 🚫 Client disconnected for Job {job_id}")
+        raise HTTPException(status_code=499, detail="Client disconnected")
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Playback error for Job {job_id}: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Playback error: {e}")
+        print(
+            f"[Playback Endpoint] ❌ Unexpected error during playback for Job {job_id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=f"Playback failed: {e}")
     finally:
-        # Always set cancel event and close progress bars
+        print(f"[Playback Endpoint] 🏁 Cleanup for Job {job_id}. Setting cancel event.")
         cancel_event.set()
-        if request.show_progress:
-            if pbar_gen:
-                pbar_gen.close()
-            if pbar_play:
-                pbar_play.close()
-        print(f"Playback finished for Job {job_id}.")
-
-    duration = played_frames_count / SAMPLE_RATE
-    return JSONResponse(
-        {
-            "status": "success",
-            "message": "Audio playback completed on server",
-            "duration_seconds": round(duration, 2),
-            "frames_played": played_frames_count,
-        }
-    )
+        # Ensure progress bar is closed on error
+        if "pbar" in locals() and pbar is not None:
+            pbar.close()
+        # Clear CURRENT_JOB if it was this job
+        if CURRENT_JOB is job:
+            CURRENT_JOB = None
 
 
 @app.post("/v1/audio/speech/cancel")
@@ -760,30 +733,30 @@ async def health_check():
 # ===================================================================
 
 
-
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="OpenAI-compatible TTS Server")
     parser.add_argument(
-        "--port", 
-        type=int, 
-        default=8000, 
-        help="Port to run the server on (default: 8000)"
+        "--port", "-p",
+        type=int,
+        default=8000,
+        help="Port to run the server on (default: 8000)",
     )
     parser.add_argument(
-        "--host", 
-        type=str, 
-        default="0.0.0.0", 
-        help="Host to bind the server to (default: 0.0.0.0)"
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the server to (default: 0.0.0.0)",
     )
     args = parser.parse_args()
-    
+
     print("🚀 Starting OpenAI-compatible TTS server...")
     print(f"   Access the frontend playground at: http://{args.host}:{args.port}")
     print("   Architecture: Single-worker thread model")
     print(f"   Available voices: {len(load_available_voices())}")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
 
 if __name__ == "__main__":
     main()
