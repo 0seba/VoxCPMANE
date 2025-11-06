@@ -8,6 +8,16 @@
 - 🎧 **Server-side Playback**: Direct audio playback on the server
 - 🌐 **Web Interface**: Interactive playground for testing
 
+## Voice Cloning
+
+https://github.com/user-attachments/assets/02ffa400-b2fd-422e-a3ad-a0ea232a55aa
+
+## Included Voices [Listen samples](https://gregr.org/tts-samples/)
+
+
+https://github.com/user-attachments/assets/28880ed2-2e21-4eb4-b0ce-18a100403e87
+
+
 ## Installation
 
 ### Prerequisites
