@@ -29,9 +29,6 @@ import asyncio
 from dataclasses import dataclass
 import argparse
 
-# ===================================================================
-# 🚀 1. Model Setup (Unchanged)
-# ===================================================================
 
 REPO_ID = "seba/VoxCPM-ANE"
 MODEL_PATH_PREFIX = ""
@@ -43,8 +40,6 @@ try:
     MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
     print(f"✅ Model files are available at: {MODEL_PATH_PREFIX}")
     VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
-
-    # ... [All your model path and file existence checks] ...
 
     locdit_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "locdit_f16.mlmodelc")
     projections_mlmodel_path = os.path.join(
@@ -86,7 +81,6 @@ try:
             print(f"  - {f}")
         exit()
 
-    # --- Model Loading ---
     print("Loading CoreML models...")
     locdit_mlmodel = ct.models.CompiledMLModel(
         locdit_mlmodel_path, compute_units=ct.ComputeUnit.CPU_AND_NE
@@ -131,15 +125,9 @@ try:
 
 except Exception as e:
     print(f"❌ An unexpected error occurred during model setup: {e}")
-    # Re-raise to stop the server from starting
     raise
 
-# ===================================================================
-# ⚙️ 2. Generation Actor (Worker) Setup
-# ===================================================================
 
-
-# This dataclass defines a "job" for the generation worker
 @dataclass
 class GenerationJob:
     request: "SpeechRequest"
@@ -162,25 +150,17 @@ JOB_COUNTER = 0
 
 def generation_worker():
     """
-    This is the *only* thread that touches the C++ model.
+    This is the *only* thread that touches the CoreML model.
     It runs forever, waiting for jobs from GENERATION_QUEUE.
     """
     global CURRENT_JOB
-    print(
-        f"[Worker] 🚀 Generation worker thread started (TID: {threading.current_thread().ident})"
-    )
 
     while True:
         try:
-            # 1. Wait for a job
-            # This call blocks until a job is available
             job = GENERATION_QUEUE.get()
-            print(f"[Worker] 🟢 Picked up Job {job.job_id}")
             CURRENT_JOB = job
 
-            # 2. Run the generation
             try:
-                # Get the generator
                 audio_generator = generate_audio_chunks(
                     text_to_generate=job.request.input,
                     prompt_wav_path=job.request.prompt_wav_path,
@@ -189,51 +169,30 @@ def generation_worker():
                     max_length=job.request.max_length,
                     cfg_value=job.request.cfg_value,
                     inference_timesteps=job.request.inference_timesteps,
-                    cancellation_event=job.cancel_event,  # Pass the per-job event
+                    cancellation_event=job.cancel_event,
                 )
 
-                # 3. Feed chunks to the output queue
                 for chunk in audio_generator:
                     if job.cancel_event.is_set():
-                        print(f"[Worker] 🟡 Job {job.job_id} cancelled by event.")
                         break
 
-                    # Put chunk in the output queue.
-                    # This might block if the client isn't consuming,
-                    # which is what we want (backpressure).
                     job.output_queue.put(chunk)
 
-                if not job.cancel_event.is_set():
-                    print(f"[Worker] ✅ Job {job.job_id} finished normally.")
-
             except Exception as e:
-                # Handle errors *during* generation
-                print(f"[Worker] ❌ Error during generation for Job {job.job_id}: {e}")
-                # Send the error to the client via the queue
                 job.output_queue.put(e)
 
             finally:
-                # 4. Signal completion (or error/cancellation)
-                # Put the "None" sentinel to tell the client we're done
                 job.output_queue.put(None)
-                print(f"[Worker] 🏁 Job {job.job_id} complete. Cleaning up.")
                 CURRENT_JOB = None
                 GENERATION_QUEUE.task_done()
 
         except Exception as e:
-            # Handle errors in the worker loop itself
-            print(f"[Worker] ❌ FATAL WORKER ERROR: {e}. Restarting loop.")
-            # Clear state to be safe
             CURRENT_JOB = None
             if "job" in locals() and isinstance(job, GenerationJob):
                 job.output_queue.put(Exception("Worker failed"))
                 GENERATION_QUEUE.task_done()
             time.sleep(1)
 
-
-# ===================================================================
-# 🎵 3. Audio Generation & Helper Functions
-# ===================================================================
 
 SAMPLE_RATE = 16000
 app = FastAPI(title="OpenAI Compatible TTS Server")
@@ -253,7 +212,6 @@ app.add_middleware(
 )
 
 
-# --- Request Models ---
 class SpeechRequest(BaseModel):
     model: str = "voxcpm-0.5b"
     input: str
@@ -270,9 +228,8 @@ class PlaybackRequest(SpeechRequest):
     show_progress: Optional[bool] = True
 
 
-# --- Voice Cache ---
 def load_available_voices():
-    cache_dir = "assets/caches"  # Note: Your code used VOICE_CACHE_DIR, but logic used "assets/caches". Sticking to this.
+    cache_dir = "assets/caches"
     voices = []
     if os.path.exists(cache_dir):
         for file in os.listdir(cache_dir):
@@ -296,7 +253,6 @@ def load_voice_cache(voice_name: str):
         )
 
 
-# --- Param Validation ---
 def validate_voice_parameters(
     max_length: int, cfg_value: float, inference_timesteps: int
 ):
@@ -314,28 +270,23 @@ def validate_voice_parameters(
         )
 
 
-# --- Core Generation Function (Modified) ---
 def generate_audio_chunks(
     text_to_generate,
     prompt_wav_path,
     prompt_text,
     voice=None,
-    max_length=2048,  # Default was 4096, but validation says 2048
+    max_length=2048,
     cfg_value=2.0,
     inference_timesteps=10,
-    cancellation_event: threading.Event = None,  # <-- Accepts the per-job event
+    cancellation_event: threading.Event = None,
 ):
-    """Generator that yields audio chunks and respects the cancellation_event"""
     import re
 
-    # Ensure a default event if none is provided
     if cancellation_event is None:
         cancellation_event = threading.Event()
 
-    # Validate parameters
     validate_voice_parameters(max_length, cfg_value, inference_timesteps)
 
-    # ... [Rest of your audio/text setup logic is unchanged] ...
     audio_cache = None
     audio = None
 
@@ -377,9 +328,7 @@ def generate_audio_chunks(
             audio = np.pad(audio, ((0, 0), (0, pad_width)))
         audio = audio[None, :]
 
-    # Generate audio
     try:
-        # Determine the correct generation method
         if voice is not None:
             generator = model.tts_model._generate_threaded_prompt_processing(
                 text_token,
@@ -398,41 +347,28 @@ def generate_audio_chunks(
                 inference_timesteps=inference_timesteps,
             )
 
-        # Iterate and yield, checking for cancellation
         for (chunk,) in generator:
             if cancellation_event.is_set():
-                print("Generation cancelled by event.")
                 break
             audio_chunk_float32 = chunk.astype(np.float32)
             yield audio_chunk_float32
 
     except GeneratorExit:
-        print("Generator exited (likely due to client disconnect)")
+        pass
     except Exception as e:
-        print(f"Error in generate_audio_chunks: {e}")
-        raise  # Re-raise to be caught by the worker
+        raise
     finally:
-        # IMPORTANT: Set the event on *any* exit (normal, error, or cancel)
-        # This tells the underlying model thread to stop.
         cancellation_event.set()
-        print("generate_audio_chunks finalizing.")
-
-
-# ===================================================================
-# 🖥️ 4. FastAPI Endpoints (Rewritten)
-# ===================================================================
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Starts the background generation worker thread."""
     worker_thread = threading.Thread(target=generation_worker, daemon=True)
     worker_thread.start()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def get_frontend():
-    """Serves the frontend playground HTML file"""
     try:
         async with aiofiles.open(FRONTEND_FILE, mode="r") as f:
             content = await f.read()
@@ -447,80 +383,49 @@ async def get_frontend():
 async def poll_queue_for_chunks(
     output_queue: queue.Queue, poll_interval: float = 0.005
 ):
-    """
-    Asynchronous generator that polls a thread-safe
-    queue for data.
-    """
     while True:
         try:
-            # Get item without blocking the event loop
             item = output_queue.get_nowait()
 
             if item is None:
-                # Sentinel: generation is done
                 break
             elif isinstance(item, Exception):
-                # An error occurred in the worker
-                print(f"Propagating worker error to client: {item}")
                 raise item
             else:
-                # Yield the audio chunk
                 yield item
 
         except queue.Empty:
-            # Queue was empty, sleep asynchronously
             await asyncio.sleep(poll_interval)
 
 
 @app.post("/v1/audio/speech/stream")
 async def stream_speech(request: SpeechRequest):
-    """OpenAI-compatible streaming TTS endpoint"""
     global JOB_COUNTER
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
 
-    # 1. Create resources for this job
-    output_queue = queue.Queue(maxsize=1024)  # Small buffer
+    output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
-    # 2. Try to queue the job
     try:
         GENERATION_QUEUE.put_nowait(job)
-        print(f"[Endpoint] ➡️ Queued Job {job_id} for streaming.")
     except queue.Full:
-        print(f"[Endpoint] 🚦 Queue is full. Rejecting Job {job_id}.")
         raise HTTPException(
             status_code=429, detail="Server is busy processing another request"
         )
 
-    # 3. Create the streaming generator
     async def audio_stream_generator():
-        """
-        This async generator polls the job's output queue
-        and yields data to the client.
-        """
         try:
             async for chunk in poll_queue_for_chunks(output_queue):
                 # Convert to 16-bit PCM bytes
                 chunk_16bit = (chunk * 32767).astype(np.int16)
                 yield chunk_16bit.tobytes()
-            print(f"[Endpoint] Streaming finished for Job {job_id}.")
         except Exception as e:
-            # This catches errors from the worker
-            print(f"[Endpoint] ❌ Error in stream for Job {job_id}: {e}")
-            # We can't raise an HTTPException here as headers are already sent
-            # The stream will just be terminated
+            pass
         finally:
-            # THIS IS THE MOST IMPORTANT PART
-            # When the client disconnects (or stream finishes),
-            # this *always* runs.
-            print(
-                f"[Endpoint] ⏹️ Stream generator cleanup for Job {job_id}. Setting cancel event."
-            )
             cancel_event.set()
 
-    # 4. Return the StreamingResponse
     return StreamingResponse(
         audio_stream_generator(),
         media_type="application/octet-stream",
@@ -530,39 +435,27 @@ async def stream_speech(request: SpeechRequest):
 
 @app.post("/v1/audio/speech/playback")
 async def playback_speech(request: PlaybackRequest):
-    """
-    Endpoint that plays audio on the server *as it is generated* (streaming)
-    and waits for the entire audio to be played before returning.
-    """
     global JOB_COUNTER, CURRENT_JOB
     JOB_COUNTER += 1
     job_id = JOB_COUNTER
 
-    print(f"[Playback Endpoint] 🎵 Starting playback request for Job {job_id}")
-
-    # 1. Create resources for this job
     output_queue = queue.Queue(maxsize=1024)
     cancel_event = threading.Event()
     job = GenerationJob(request, output_queue, cancel_event, job_id)
 
-    # 2. Try to queue the job
     try:
         GENERATION_QUEUE.put_nowait(job)
-        CURRENT_JOB = job  # Set this so /cancel can find it
-        print(f"[Playback Endpoint] ➡️ Queued Job {job_id} for playback.")
+        CURRENT_JOB = job
     except queue.Full:
-        print(f"[Playback Endpoint] 🚦 Queue is full. Rejecting Job {job_id}.")
         raise HTTPException(
             status_code=429, detail="Server is busy processing another request"
         )
 
     client_disconnected = False
     playback_start_time = time.time()
-    TIMEOUT_SECONDS = 300  # 5 minute timeout
+    TIMEOUT_SECONDS = 300
 
-    # 3. Play audio chunks as they arrive
     try:
-        # Verify audio device availability
         if not sd.query_devices():
             raise HTTPException(
                 status_code=500, detail="No audio output devices available"
@@ -581,16 +474,12 @@ async def playback_speech(request: PlaybackRequest):
         # Use context manager for proper stream lifecycle
         with sd.OutputStream(
             samplerate=SAMPLE_RATE,
-            channels=1,  # Mono
+            channels=1,
             dtype=np.float32,
-            latency="low",  # Low latency for real-time playback
-            # IMPORTANT: blocksize should be smaller than chunk size for smooth playback
-            blocksize=1024,  # Adjust based on your typical chunk size
+            latency="low",
+            blocksize=1024,
         ) as stream:
-
-            # Process all chunks
             async for chunk in chunks:
-                # Timeout check
                 elapsed = time.time() - playback_start_time
                 if elapsed > TIMEOUT_SECONDS:
                     raise HTTPException(
@@ -599,12 +488,11 @@ async def playback_speech(request: PlaybackRequest):
                     )
 
                 chunk_count += 1
-                last_chunk = chunk  # Keep reference to the last chunk
+                last_chunk = chunk
 
                 if pbar:
                     pbar.update(1)
 
-                # Write chunk in a thread to avoid blocking the event loop
                 await asyncio.to_thread(stream.write, chunk)
 
             # CRITICAL FIX: Apply fade-out to prevent click/pop at end
@@ -632,18 +520,13 @@ async def playback_speech(request: PlaybackRequest):
         if pbar:
             pbar.close()
 
-        # 5. Validate and finalize
         if chunk_count == 0:
             raise HTTPException(
                 status_code=500, detail="Failed to generate audio (no chunks)"
             )
 
         total_duration = time.time() - playback_start_time
-        print(
-            f"[Playback Endpoint] ✅ Playback complete for Job {job_id} ({chunk_count} chunks, {total_duration:.2f}s)."
-        )
 
-        # 6. Return success response only after full playback
         status = "cancelled" if client_disconnected else "success"
         message = f"Audio playback {'cancelled' if client_disconnected else 'completed'} for Job {job_id}"
 
@@ -659,36 +542,27 @@ async def playback_speech(request: PlaybackRequest):
 
     except asyncio.CancelledError:
         client_disconnected = True
-        print(f"[Playback Endpoint] 🚫 Client disconnected for Job {job_id}")
         raise HTTPException(status_code=499, detail="Client disconnected")
     except HTTPException:
         raise
     except Exception as e:
-        print(
-            f"[Playback Endpoint] ❌ Unexpected error during playback for Job {job_id}: {e}"
-        )
         raise HTTPException(status_code=500, detail=f"Playback failed: {e}")
     finally:
-        print(f"[Playback Endpoint] 🏁 Cleanup for Job {job_id}. Setting cancel event.")
         cancel_event.set()
-        # Ensure progress bar is closed on error
         if "pbar" in locals() and pbar is not None:
             pbar.close()
-        # Clear CURRENT_JOB if it was this job
         if CURRENT_JOB is job:
             CURRENT_JOB = None
 
 
 @app.post("/v1/audio/speech/cancel")
 async def cancel_generation():
-    """Cancel the current audio generation"""
     if CURRENT_JOB is None:
         return JSONResponse(
             {"status": "success", "message": "No generation in progress"}
         )
 
     try:
-        print(f"[Endpoint] 🔴 Received /cancel request for Job {CURRENT_JOB.job_id}")
         CURRENT_JOB.cancel_event.set()
         return JSONResponse(
             {
@@ -697,7 +571,6 @@ async def cancel_generation():
             }
         )
     except Exception as e:
-        print(f"Error cancelling generation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cancel: {e}")
 
 
@@ -728,16 +601,11 @@ async def health_check():
     }
 
 
-# ===================================================================
-# 🏁 5. Server Run
-# ===================================================================
-
-
 def main():
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description="OpenAI-compatible TTS Server")
     parser.add_argument(
-        "--port", "-p",
+        "--port",
+        "-p",
         type=int,
         default=8000,
         help="Port to run the server on (default: 8000)",
@@ -750,9 +618,8 @@ def main():
     )
     args = parser.parse_args()
 
-    print("🚀 Starting OpenAI-compatible TTS server...")
+    print("🚀 Starting server...")
     print(f"   Access the frontend playground at: http://{args.host}:{args.port}")
-    print("   Architecture: Single-worker thread model")
     print(f"   Available voices: {len(load_available_voices())}")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
