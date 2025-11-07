@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/28880ed2-2e21-4eb4-b0ce-18a100403e87
 
 ### Prerequisites
 
-- macOS with Apple Silicon (M1/M2/M3) for ANE acceleration
+- macOS with Apple Silicon for ANE acceleration
 - Python 3.9-3.12
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
 
