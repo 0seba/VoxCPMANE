@@ -26,21 +26,14 @@ https://github.com/user-attachments/assets/28880ed2-2e21-4eb4-b0ce-18a100403e87
 - Python 3.9-3.12
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
 
-### Quick Start
+### Install with `pip` or `uv`
 
 ```bash
-# Clone the repository
-git clone https://github.com/0seba/VoxCPMANE.git
-cd VoxCPMANE
+uv pip install voxcpmane
+```
 
-# Install dependencies
-uv sync
-
-# Start the server
-uv run voxcpmane-server -p ${PORT}
-
-# Or run directly
-uv run python -m voxcpmane.server
+```bash
+pip install voxcpmane
 ```
 
 The server will start on `http://localhost:8000` by default. You can access the web playground at the root URL.
