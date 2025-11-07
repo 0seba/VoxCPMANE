@@ -12,3 +12,4 @@ wheels/
 *.DS_Store
 assets/
 *.ipynb*
+.python-version

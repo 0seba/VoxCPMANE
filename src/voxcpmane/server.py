@@ -38,7 +38,6 @@ try:
     lm_length = 8
     print(f"🚀 Downloading/loading model files from Hugging Face Hub repo: {REPO_ID}")
     MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
-    print(f"✅ Model files are available at: {MODEL_PATH_PREFIX}")
     VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
 
     locdit_mlmodel_path = os.path.join(MODEL_PATH_PREFIX, "locdit_f16.mlmodelc")
@@ -229,7 +228,7 @@ class PlaybackRequest(SpeechRequest):
 
 
 def load_available_voices():
-    cache_dir = "assets/caches"
+    cache_dir = VOICE_CACHE_DIR
     voices = []
     if os.path.exists(cache_dir):
         for file in os.listdir(cache_dir):
@@ -239,7 +238,8 @@ def load_available_voices():
 
 
 def load_voice_cache(voice_name: str):
-    cache_path = f"assets/caches/{voice_name}.npy"
+
+    cache_path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
     if not os.path.exists(cache_path):
         raise HTTPException(
             status_code=404,
