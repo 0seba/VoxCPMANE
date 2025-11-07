@@ -1,6 +1,6 @@
 # VoxCPMANE
 
-[VoxCPM TTS](https://github.com/OpenBMB/VoxCPM) model with Apple Neural Engine (ANE) backend server. CoreML models available in [Huggingface repository]([https://github.com/0seba/VoxCPMANE](https://huggingface.co/seba/VoxCPM-ANE)).
+[VoxCPM TTS](https://github.com/OpenBMB/VoxCPM) model with Apple Neural Engine (ANE) backend server. CoreML models available in [Huggingface repository](https://huggingface.co/seba/VoxCPM-ANE).
 
 
 - 🎤 **Voice Cloning**: Support for custom voice prompts and cached voices
