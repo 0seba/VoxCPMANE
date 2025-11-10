@@ -25,6 +25,7 @@ https://github.com/user-attachments/assets/28880ed2-2e21-4eb4-b0ce-18a100403e87
 - macOS with Apple Silicon for ANE acceleration
 - Python 3.9-3.12
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
+- `pydub` required for audio formats other than `wav` in `/speech` endpoint
 
 ### Install with `pip` or `uv`
 
