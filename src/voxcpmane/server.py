@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import threading
 import traceback
@@ -15,6 +16,7 @@ from fastapi.responses import (
     FileResponse,
     JSONResponse,
     HTMLResponse,
+    Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
@@ -28,6 +30,14 @@ from huggingface_hub import snapshot_download
 import asyncio
 from dataclasses import dataclass
 import argparse
+
+try:
+    from pydub import AudioSegment
+
+    PYDUB_AVAILABLE = True
+except ImportError:
+    AudioSegment = None
+    PYDUB_AVAILABLE = False
 
 
 REPO_ID = "seba/VoxCPM-ANE"
@@ -396,6 +406,121 @@ async def poll_queue_for_chunks(
 
         except queue.Empty:
             await asyncio.sleep(poll_interval)
+
+
+@app.post("/v1/audio/speech")
+async def create_speech(request: SpeechRequest):
+    audio_format = request.response_format.lower()
+
+    # Fast path: Use soundfile for WAV and FLAC
+    if audio_format in ["wav", "flac"]:
+        # These formats are always supported
+        pass
+    # Conversion path: Use pydub for other formats (mp3, ogg, opus, etc.)
+    else:
+        if not PYDUB_AVAILABLE:
+            raise HTTPException(
+                status_code=501,
+                detail=f"Format '{audio_format}' is not supported. "
+                f"Install 'pydub' to enable conversion.",
+            )
+
+        # Check if the format is specifically supported
+        if audio_format not in ["mp3", "opus", "ogg", "aac"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported format: {audio_format}. Supported: wav, flac, mp3, opus, ogg, aac",
+            )
+
+    global JOB_COUNTER
+    JOB_COUNTER += 1
+    job_id = JOB_COUNTER
+
+    output_queue = queue.Queue(maxsize=1024)
+    cancel_event = threading.Event()
+    job = GenerationJob(request, output_queue, cancel_event, job_id)
+
+    try:
+        GENERATION_QUEUE.put_nowait(job)
+    except queue.Full:
+        raise HTTPException(
+            status_code=429, detail="Server is busy processing another request"
+        )
+
+    all_chunks = []
+    try:
+        async for chunk in poll_queue_for_chunks(output_queue):
+            all_chunks.append(chunk)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Audio generation failed: {str(e)}"
+        )
+    finally:
+        cancel_event.set()
+
+    if not all_chunks:
+        raise HTTPException(
+            status_code=500, detail="Audio generation failed (no chunks produced)"
+        )
+
+    try:
+        full_audio_float32 = np.concatenate(all_chunks)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to concatenate audio chunks: {str(e)}"
+        )
+
+    audio_format = request.response_format.lower()
+    buffer = io.BytesIO()
+
+    if audio_format in ["wav", "flac"]:
+        try:
+            soundfile.write(
+                buffer, full_audio_float32, SAMPLE_RATE, format=audio_format
+            )
+            media_type = f"audio/{audio_format}"
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to encode audio to {audio_format}: {str(e)}",
+            )
+
+    else:
+        try:
+            pcm_data_16bit = (full_audio_float32 * 32767).astype(np.int16)
+
+            segment = AudioSegment(
+                data=pcm_data_16bit.tobytes(),
+                sample_width=2,  # 2 bytes = 16-bit
+                frame_rate=SAMPLE_RATE,
+                channels=1,
+            )
+
+            if audio_format == "mp3":
+                media_type = "audio/mpeg"
+                segment.export(buffer, format="mp3")
+            elif audio_format == "opus":
+                media_type = "audio/opus"
+                segment.export(buffer, format="opus")
+            elif audio_format == "ogg":
+                media_type = "audio/ogg"
+                segment.export(buffer, format="ogg")
+            elif audio_format == "aac":
+                media_type = "audio/aac"
+                segment.export(
+                    buffer, format="adts"
+                )  # ADTS is a common container for raw AAC
+
+        except Exception as e:
+            # This can happen if ffmpeg is not installed!
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to encode audio to {audio_format}. "
+                f"Ensure 'ffmpeg' is installed and accessible. Error: {str(e)}",
+            )
+
+    buffer.seek(0)
+    return Response(content=buffer.getvalue(), media_type=media_type)
 
 
 @app.post("/v1/audio/speech/stream")
