@@ -239,8 +239,8 @@ Access at: `http://localhost:{PORT}`
 
 ## Roadmap
 
-- [] Creating custom voices and automatic prompt caching
-- [] Chunked long audio generation
+  - [ ] Creating custom voices and automatic prompt caching
+  - [ ] Chunked long audio generation
 
 ## Acknowledgments
 
