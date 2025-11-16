@@ -237,6 +237,11 @@ Interactive web interface for testing the TTS functionality.
 
 Access at: `http://localhost:{PORT}`
 
+## Roadmap
+
+- [] Creating custom voices and automatic prompt caching
+- [] Chunked long audio generation
+
 ## Acknowledgments
 
 - [VoxCPM](https://github.com/OpenBMB/VoxCPM) - Original TTS model
