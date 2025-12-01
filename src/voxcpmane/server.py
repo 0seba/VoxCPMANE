@@ -419,10 +419,11 @@ def generate_audio_chunks(
         cancellation_event.set()
 
 
-def scan_and_compile_mp3_cache():
+def scan_and_compile_audio_cache():
     """
-    Scans the custom cache directory for .mp3 and .txt files.
+    Scans the custom cache directory for audio and .txt files.
     If both exist and .npy is missing, creates the voice cache.
+    Supported audio formats: wav, mp3, flac, ogg, opus, aac, m4a.
     If partial files exist without .npy, warns the user.
     """
     if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
@@ -434,24 +435,34 @@ def scan_and_compile_mp3_cache():
         print(f"⚠️  Failed to list custom cache dir: {e}")
         return
 
-    # Collect potential voice names
-    mp3_files = {f[:-4] for f in files if f.endswith(".mp3")}
-    txt_files = {f[:-4] for f in files if f.endswith(".txt")}
-    npy_files = {f[:-4] for f in files if f.endswith(".npy")}
+    AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac", ".m4a"}
 
-    all_names = mp3_files | txt_files
+    # Map basename -> {extensions present}
+    file_map = {}
+    for f in files:
+        name, ext = os.path.splitext(f)
+        ext = ext.lower()
+        if name not in file_map:
+            file_map[name] = set()
+        file_map[name].add(ext)
 
-    for name in all_names:
-        if name in npy_files:
+    for name, extensions in file_map.items():
+        if ".npy" in extensions:
             continue
 
-        has_mp3 = name in mp3_files
-        has_txt = name in txt_files
+        has_txt = ".txt" in extensions
+        audio_ext = None
+        for ext in extensions:
+            if ext in AUDIO_EXTENSIONS:
+                audio_ext = ext
+                break
 
-        if has_mp3 and has_txt:
-            print(f"🔄 Compiling cache for new voice: '{name}' from .mp3 and .txt...")
+        if has_txt and audio_ext:
+            print(
+                f"🔄 Compiling cache for new voice: '{name}' from {audio_ext} and .txt..."
+            )
 
-            mp3_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.mp3")
+            audio_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}{audio_ext}")
             txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.txt")
 
             # Read text
@@ -462,28 +473,35 @@ def scan_and_compile_mp3_cache():
                 print(f"❌ Failed to read text for '{name}': {e}")
                 continue
 
-            # Convert audio
-            if not PYDUB_AVAILABLE:
-                print(
-                    f"❌ Cannot compile '{name}': pydub is not installed (required for .mp3)"
-                )
-                continue
-
             tmp_wav_path = None
             try:
-                # Convert mp3 to wav temp file
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                    tmp_wav_path = tmp_wav.name
+                processing_path = None
+                # Convert audio using pydub if available (robust)
+                if PYDUB_AVAILABLE:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".wav", delete=False
+                    ) as tmp_wav:
+                        tmp_wav_path = tmp_wav.name
 
-                # Load mp3 and export as wav
-                audio = AudioSegment.from_mp3(mp3_path)
-                audio.export(tmp_wav_path, format="wav")
+                    # AudioSegment.from_file handles various formats (ffmpeg)
+                    audio = AudioSegment.from_file(audio_path)
+                    audio.export(tmp_wav_path, format="wav")
+                    processing_path = tmp_wav_path
+                else:
+                    # If pydub missing, rely on what soundfile supports directly (usually wav, flac, ogg)
+                    if audio_ext in [".wav", ".flac", ".ogg"]:
+                        processing_path = audio_path
+                    else:
+                        print(
+                            f"❌ Cannot compile '{name}': pydub is not installed (required for {audio_ext})"
+                        )
+                        continue
 
                 # Create voice
                 # model is global in server.py
                 model.create_custom_voice(
                     voice_name=name,
-                    prompt_wav_path=tmp_wav_path,
+                    prompt_wav_path=processing_path,
                     prompt_text=prompt_text,
                     cache_dir=CUSTOM_VOICE_CACHE_DIR,
                 )
@@ -498,13 +516,13 @@ def scan_and_compile_mp3_cache():
                     except:
                         pass
 
-        else:
-            # Missing one component and no npy
+        elif has_txt or audio_ext:
+            # Only partial match found (and no npy)
             missing = []
-            if not has_mp3:
-                missing.append(".mp3")
             if not has_txt:
                 missing.append(".txt")
+            if not audio_ext:
+                missing.append("audio file")
             print(
                 f"⚠️  Incomplete voice files for '{name}': Missing {', '.join(missing)}. .npy cache not generated."
             )
@@ -512,7 +530,7 @@ def scan_and_compile_mp3_cache():
 
 @app.on_event("startup")
 async def startup_event():
-    scan_and_compile_mp3_cache()
+    scan_and_compile_audio_cache()
     worker_thread = threading.Thread(target=generation_worker, daemon=True)
     worker_thread.start()
 

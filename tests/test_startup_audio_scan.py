@@ -60,7 +60,7 @@ os.path.exists = mock_exists
 
 # Mock VoxCPMANE before import
 with patch("voxcpmane.voxcpm.VoxCPMANE") as MockVox:
-    from voxcpmane.server import scan_and_compile_mp3_cache, model
+    from voxcpmane.server import scan_and_compile_audio_cache, model
 
 
 class TestStartupScan(unittest.TestCase):
@@ -81,39 +81,45 @@ class TestStartupScan(unittest.TestCase):
             return False
 
         mock_exists.side_effect = side_effect_exists
+
+        # Scenario:
+        # voice1: mp3 + txt -> create
+        # voice2: wav + txt -> create
+        # voice3: flac only -> fail/warn
+        # voice4: txt only -> fail/warn
+        # voice5: npy exists -> ignore
         mock_listdir.return_value = [
             "voice1.mp3",
             "voice1.txt",
-            "voice2.mp3",
-            "voice3.txt",
-            "voice4.npy",
+            "voice2.wav",
+            "voice2.txt",
+            "voice3.flac",
+            "voice4.txt",
+            "voice5.npy",
         ]
 
         # Mock AudioSegment
         mock_segment = MagicMock()
-        mock_audio_segment.from_mp3.return_value = mock_segment
+        mock_audio_segment.from_file.return_value = mock_segment
 
         # Run
-        scan_and_compile_mp3_cache()
+        scan_and_compile_audio_cache()
 
         # Verifications
 
-        # voice1: Both mp3 and txt exist, npy missing. Should trigger creation.
-        mock_audio_segment.from_mp3.assert_called_with("/tmp/custom_cache/voice1.mp3")
-        mock_segment.export.assert_called()
-        mock_model.create_custom_voice.assert_called_with(
-            voice_name="voice1",
-            prompt_wav_path=mock_segment.export.call_args[0][0],  # temp file path
-            prompt_text="transcript",
-            cache_dir="/tmp/custom_cache",
-        )
+        # voice1 (mp3)
+        mock_audio_segment.from_file.assert_any_call("/tmp/custom_cache/voice1.mp3")
 
-        # voice2: mp3 only. Should warn.
-        # voice3: txt only. Should warn.
-        # voice4: npy exists. Should ignore.
+        # voice2 (wav)
+        mock_audio_segment.from_file.assert_any_call("/tmp/custom_cache/voice2.wav")
 
-        # Verify create_custom_voice was called ONLY ONCE (for voice1)
-        self.assertEqual(mock_model.create_custom_voice.call_count, 1)
+        # Verify create_custom_voice was called TWICE (voice1 and voice2)
+        self.assertEqual(mock_model.create_custom_voice.call_count, 2)
+
+        # Check calls args
+        calls = mock_model.create_custom_voice.call_args_list
+        voice_names = {call[1]["voice_name"] for call in calls}
+        self.assertEqual(voice_names, {"voice1", "voice2"})
 
 
 if __name__ == "__main__":
