@@ -134,7 +134,31 @@ curl -X POST "http://localhost:8000/v1/audio/speech/cancel"
 }
 ```
 
-### 5. List Available Voices
+### 5. Create Custom Voice
+
+**POST** `/v1/voices`
+
+Creates a new cached voice from a prompt audio file.
+
+**Request:**
+```json
+{
+  "voice_name": "my_custom_voice",
+  "prompt_wav_path": "/path/to/prompt.wav",
+  "prompt_text": "Transcription of the prompt audio", // Can be raw text or path to .txt file
+  "replace": false
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Voice 'my_custom_voice' created successfully."
+}
+```
+
+### 6. List Available Voices
 
 **GET** `/voices`
 
@@ -154,7 +178,7 @@ curl -X GET "http://localhost:8000/voices"
 }
 ```
 
-### 6. Health Check
+### 7. Health Check
 
 **GET** `/health`
 
@@ -176,10 +200,18 @@ curl -X GET "http://localhost:8000/health"
 }
 ```
 
-### 7. Web Playground
+### 8. Web Playground
 
 **GET** `/`
 
 Interactive web interface for testing the TTS functionality.
 
 Access at: `http://localhost:{PORT}`
+
+## CLI Arguments
+
+The server accepts the following command-line arguments:
+
+- `--port`: Port to run the server on (default: 8000)
+- `--host`: Host to bind the server to (default: 0.0.0.0)
+- `--cache-dir`: Directory for custom voice caches (default: `~/.cache/ane_tts`)
