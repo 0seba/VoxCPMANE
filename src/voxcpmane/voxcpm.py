@@ -27,6 +27,7 @@ from .text_normalize import TextNormalizer
 
 STATE_MAX_LENGTH = 2048
 
+
 def mask_multichar_chinese_tokens(tokenizer: PreTrainedTokenizer):
     """Create a tokenizer wrapper that converts multi-character Chinese tokens to single characters.
 
@@ -956,7 +957,9 @@ class VoxCPMModelANE:
                 pred_audio_feat_prev = None
                 target_text_token_prev = None
 
-                for i, (latent_pred, pred_audio_feat, stop_flag) in enumerate(inference_result):
+                for i, (latent_pred, pred_audio_feat, stop_flag) in enumerate(
+                    inference_result
+                ):
                     # if i == 0:
                     #     decode_future = executor.submit(
                     #         self.audio_vae_decoder,
@@ -1362,7 +1365,14 @@ class VoxCPMModelANE:
                     length = audio_cache.shape[-1]
                     num_steps = math.ceil(length / FEAT_ENCODER_CHUNK_SIZE)
                     for i in range(num_steps):
-                        q_audio_vae_out.put(audio_cache[..., i * FEAT_ENCODER_CHUNK_SIZE: (i + 1) * FEAT_ENCODER_CHUNK_SIZE])
+                        q_audio_vae_out.put(
+                            audio_cache[
+                                ...,
+                                i
+                                * FEAT_ENCODER_CHUNK_SIZE : (i + 1)
+                                * FEAT_ENCODER_CHUNK_SIZE,
+                            ]
+                        )
                     return
 
                 if audio_data is None or audio_data.shape[1] == 0:
@@ -1620,3 +1630,33 @@ class VoxCPMANE:
 
     def generate_streaming(self, *args, **kwargs) -> Generator[np.ndarray, None, None]:
         return self._generate(*args, streaming=True, **kwargs)
+
+    def create_custom_voice(
+        self,
+        voice_name: str,
+        prompt_wav_path: str,
+        prompt_text: str,
+        cache_dir: str,
+    ):
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir, exist_ok=True)
+
+        # Generate cache using the model
+        cache = self.tts_model.build_prompt_cache(
+            prompt_text=prompt_text,
+            prompt_wav_path=prompt_wav_path,
+        )
+
+        # Extract audio features (the .npy content)
+        audio_feat = cache["audio_feat"]
+
+        # Paths
+        npy_path = os.path.join(cache_dir, f"{voice_name}.npy")
+        txt_path = os.path.join(cache_dir, f"{voice_name}.txt")
+
+        # Save
+        np.save(npy_path, audio_feat)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(prompt_text)
+
+        return npy_path, txt_path

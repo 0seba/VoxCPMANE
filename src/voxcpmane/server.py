@@ -43,6 +43,7 @@ except ImportError:
 REPO_ID = "seba/VoxCPM-ANE"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
+CUSTOM_VOICE_CACHE_DIR = os.path.expanduser("~/.cache/ane_tts")
 
 try:
     lm_length = 8
@@ -237,30 +238,76 @@ class PlaybackRequest(SpeechRequest):
     show_progress: Optional[bool] = True
 
 
+class CreateVoiceRequest(BaseModel):
+    voice_name: str
+    prompt_wav_path: str
+    prompt_text: str
+    replace: Optional[bool] = False
+
+
 def load_available_voices():
-    cache_dir = VOICE_CACHE_DIR
-    voices = []
-    if os.path.exists(cache_dir):
-        for file in os.listdir(cache_dir):
+    voices = set()
+
+    # Default cache
+    if os.path.exists(VOICE_CACHE_DIR):
+        for file in os.listdir(VOICE_CACHE_DIR):
             if file.endswith(".npy"):
-                voices.append(file[:-4])
-    return sorted(voices)
+                voices.add(file[:-4])
+
+    # Custom cache
+    if os.path.exists(CUSTOM_VOICE_CACHE_DIR):
+        for file in os.listdir(CUSTOM_VOICE_CACHE_DIR):
+            if file.endswith(".npy"):
+                voices.add(file[:-4])
+
+    return sorted(list(voices))
+
+
+def is_default_voice(voice_name: str) -> bool:
+    path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
+    return os.path.exists(path)
+
+
+def get_voice_prompt_text(voice_name: str) -> str:
+    # Check default first
+    if is_default_voice(voice_name):
+        return CACHED_VOICE_TEXT
+
+    # Check custom
+    txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.txt")
+    if os.path.exists(txt_path):
+        with open(txt_path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    # Fallback/Error
+    raise HTTPException(
+        status_code=500,
+        detail=f"Voice '{voice_name}' found in custom cache but transcription file missing at: {txt_path}",
+    )
 
 
 def load_voice_cache(voice_name: str):
 
+    # Check default first
     cache_path = os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy")
-    if not os.path.exists(cache_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Voice '{voice_name}' not found. Available: {load_available_voices()}",
-        )
-    try:
+    if os.path.exists(cache_path):
         return np.load(cache_path)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to load voice '{voice_name}': {e}"
-        )
+
+    # Check custom
+    cache_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.npy")
+    if os.path.exists(cache_path):
+        try:
+            return np.load(cache_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load custom voice '{voice_name}': {e}",
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Voice '{voice_name}' not found. Available: {load_available_voices()}",
+    )
 
 
 def validate_voice_parameters(
@@ -302,7 +349,8 @@ def generate_audio_chunks(
 
     if voice is not None:
         audio_cache = load_voice_cache(voice)
-        text = CACHED_VOICE_TEXT + " " + text_to_generate
+        prompt_text = get_voice_prompt_text(voice)
+        text = prompt_text + " " + text_to_generate
     else:
         if prompt_wav_path and prompt_wav_path.strip():
             if not os.path.exists(prompt_wav_path):
@@ -371,8 +419,118 @@ def generate_audio_chunks(
         cancellation_event.set()
 
 
+def scan_and_compile_audio_cache():
+    """
+    Scans the custom cache directory for audio and .txt files.
+    If both exist and .npy is missing, creates the voice cache.
+    Supported audio formats: wav, mp3, flac, ogg, opus, aac, m4a.
+    If partial files exist without .npy, warns the user.
+    """
+    if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
+        return
+
+    try:
+        files = os.listdir(CUSTOM_VOICE_CACHE_DIR)
+    except Exception as e:
+        print(f"⚠️  Failed to list custom cache dir: {e}")
+        return
+
+    AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac", ".m4a"}
+
+    # Map basename -> {extensions present}
+    file_map = {}
+    for f in files:
+        name, ext = os.path.splitext(f)
+        ext = ext.lower()
+        if name not in file_map:
+            file_map[name] = set()
+        file_map[name].add(ext)
+
+    for name, extensions in file_map.items():
+        if ".npy" in extensions:
+            continue
+
+        has_txt = ".txt" in extensions
+        audio_ext = None
+        for ext in extensions:
+            if ext in AUDIO_EXTENSIONS:
+                audio_ext = ext
+                break
+
+        if has_txt and audio_ext:
+            print(
+                f"🔄 Compiling cache for new voice: '{name}' from {audio_ext} and .txt..."
+            )
+
+            audio_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}{audio_ext}")
+            txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.txt")
+
+            # Read text
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    prompt_text = f.read()
+            except Exception as e:
+                print(f"❌ Failed to read text for '{name}': {e}")
+                continue
+
+            tmp_wav_path = None
+            try:
+                processing_path = None
+                # Convert audio using pydub if available (robust)
+                if PYDUB_AVAILABLE:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".wav", delete=False
+                    ) as tmp_wav:
+                        tmp_wav_path = tmp_wav.name
+
+                    # AudioSegment.from_file handles various formats (ffmpeg)
+                    audio = AudioSegment.from_file(audio_path)
+                    audio.export(tmp_wav_path, format="wav")
+                    processing_path = tmp_wav_path
+                else:
+                    # If pydub missing, rely on what soundfile supports directly (usually wav, flac, ogg)
+                    if audio_ext in [".wav", ".flac", ".ogg"]:
+                        processing_path = audio_path
+                    else:
+                        print(
+                            f"❌ Cannot compile '{name}': pydub is not installed (required for {audio_ext})"
+                        )
+                        continue
+
+                # Create voice
+                # model is global in server.py
+                model.create_custom_voice(
+                    voice_name=name,
+                    prompt_wav_path=processing_path,
+                    prompt_text=prompt_text,
+                    cache_dir=CUSTOM_VOICE_CACHE_DIR,
+                )
+                print(f"✅ Successfully compiled voice: '{name}'")
+
+            except Exception as e:
+                print(f"❌ Failed to compile voice '{name}': {e}")
+            finally:
+                if tmp_wav_path and os.path.exists(tmp_wav_path):
+                    try:
+                        os.unlink(tmp_wav_path)
+                    except:
+                        pass
+
+        elif has_txt or audio_ext:
+            # Only partial match found (and no npy)
+            missing = []
+            if not has_txt:
+                missing.append(".txt")
+            if not audio_ext:
+                missing.append("audio file")
+            print(
+                f"⚠️  Incomplete voice files for '{name}': Missing {', '.join(missing)}. .npy cache not generated."
+            )
+
+
 @app.on_event("startup")
 async def startup_event():
+    scan_and_compile_audio_cache()
     worker_thread = threading.Thread(target=generation_worker, daemon=True)
     worker_thread.start()
 
@@ -699,6 +857,63 @@ async def cancel_generation():
         raise HTTPException(status_code=500, detail=f"Failed to cancel: {e}")
 
 
+@app.post("/v1/voices")
+async def create_voice(request: CreateVoiceRequest):
+    voice_name = request.voice_name
+
+    if ".." in voice_name or "/" in voice_name or "\\" in voice_name:
+        raise HTTPException(
+            status_code=400, detail="Invalid voice name: must be a safe filename"
+        )
+
+    # Check if exists in default (Forbidden)
+    if is_default_voice(voice_name):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Voice '{voice_name}' exists in system voices and cannot be overwritten.",
+        )
+
+    # Check if exists in custom (Conflict/Replace)
+    custom_npy = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.npy")
+    if os.path.exists(custom_npy) and not request.replace:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Voice '{voice_name}' already exists in custom cache. Set replace=True to overwrite.",
+        )
+
+    # Handle prompt_text (file path or text)
+    prompt_text = request.prompt_text
+    if os.path.exists(prompt_text) and os.path.isfile(prompt_text):
+        try:
+            with open(prompt_text, "r", encoding="utf-8") as f:
+                prompt_text = f.read()
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Failed to read prompt text file: {e}"
+            )
+
+    # Validate audio path
+    if not os.path.exists(request.prompt_wav_path):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prompt audio file not found: {request.prompt_wav_path}",
+        )
+
+    try:
+        model.create_custom_voice(
+            voice_name=voice_name,
+            prompt_wav_path=request.prompt_wav_path,
+            prompt_text=prompt_text,
+            cache_dir=CUSTOM_VOICE_CACHE_DIR,
+        )
+        return {
+            "status": "success",
+            "message": f"Voice '{voice_name}' created successfully.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create voice: {e}")
+
+
 @app.get("/voices")
 async def get_available_voices():
     """Get list of available cached voices"""
@@ -708,6 +923,7 @@ async def get_available_voices():
             "voices": voices,
             "count": len(voices),
             "cache_directory": "assets/caches",
+            "custom_cache_directory": CUSTOM_VOICE_CACHE_DIR,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load voices: {e}")
@@ -741,10 +957,22 @@ def main():
         default="0.0.0.0",
         help="Host to bind the server to (default: 0.0.0.0)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=os.path.expanduser("~/.cache/ane_tts"),
+        help="Directory for custom voice caches",
+    )
     args = parser.parse_args()
+
+    global CUSTOM_VOICE_CACHE_DIR
+    CUSTOM_VOICE_CACHE_DIR = args.cache_dir
+    if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
+        os.makedirs(CUSTOM_VOICE_CACHE_DIR, exist_ok=True)
 
     print("🚀 Starting server...")
     print(f"   Access the frontend playground at: http://{args.host}:{args.port}")
+    print(f"   Custom cache dir: {CUSTOM_VOICE_CACHE_DIR}")
     print(f"   Available voices: {len(load_available_voices())}")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

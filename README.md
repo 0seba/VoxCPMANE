@@ -49,7 +49,17 @@ uv run voxcpmane-server --help
 
 - `--host`: Host to bind the server to (default: `0.0.0.0`)
 - `--port`: Port to run the server on (default: `8000`)
+- `--cache-dir`: Directory for custom voice caches (default: `~/.cache/ane_tts`)
 
+## Custom Voices
+
+You can create reusable cached voices in two ways:
+
+1.  **Via the Web Playground/API**: Use the "Create Voice" tab or `POST /v1/voices` endpoint.
+2.  **Startup Compilation**: Place pairs of audio files (e.g., `.wav`, `.mp3`) and transcriptions (`.txt`) in the custom cache directory. The server will automatically compile them into voice caches (`.npy`) on startup.
+
+Example:
+If you place `myvoice.mp3` and `myvoice.txt` in the cache directory, the server will generate `myvoice.npy` on start, making "myvoice" available for generation.
 
 ## API Reference
 
@@ -57,7 +67,7 @@ The full API documentation is available in [docs/API.md](docs/API.md).
 
 ## Roadmap
 
-  - [ ] Creating custom voices and automatic prompt caching
+  - [x] Creating custom voices and automatic prompt caching
   - [ ] Chunked long audio generation
 
 ## Acknowledgments
