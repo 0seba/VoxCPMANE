@@ -360,6 +360,8 @@ def generate_audio_chunks(
                 )
             try:
                 audio, sr = soundfile.read(prompt_wav_path)
+                if audio.ndim > 1:
+                    audio = np.mean(audio, axis=1, keepdims=False)
                 if sr != 16_000:
                     audio = soxr.resample(audio, sr, 16_000, "HQ")
                 if audio.ndim == 1:

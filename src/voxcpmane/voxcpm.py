@@ -982,7 +982,7 @@ class VoxCPMModelANE:
                     if i > 0:
                         decode_audio = decode_audio[patch_len * 2 :]
                     if stop_flag:
-                        decode_audio = decode_audio[:-1920]
+                        decode_audio = decode_audio[:-1280]
 
                     if generate_start_time is not None:
                         generate_start_time = None
@@ -1174,9 +1174,9 @@ class VoxCPMModelANE:
         # audio, sr = librosa.load(prompt_wav_path, sr=None, mono=False)
         audio, sr = soundfile.read(prompt_wav_path)
         if audio.ndim > 1:
-            audio = np.mean(audio, axis=0, keepdims=True)
-        else:
-            audio = np.expand_dims(audio, 0)
+            audio = np.mean(audio, axis=1, keepdims=False)
+        # else:
+        #     audio = np.expand_dims(audio, 0)
 
         if sr != self.sample_rate:
             resample_start = time.perf_counter()
@@ -1185,7 +1185,7 @@ class VoxCPMModelANE:
             # audio = signal.resample_poly(audio, self.sample_rate, sr,
             #                        window=('kaiser', 8.0),
             #                        padtype='constant', cval=0.0, axis=1)
-            audio = soxr.resample(audio[0], sr, self.sample_rate, quality="HQ")[None, :]
+            audio = soxr.resample(audio, sr, self.sample_rate, quality="HQ")[None, :]
 
         patch_len = self.patch_size * self.chunk_size
         if audio.shape[1] % patch_len != 0:
@@ -1649,6 +1649,7 @@ class VoxCPMANE:
 
         # Extract audio features (the .npy content)
         audio_feat = cache["audio_feat"]
+        audio_feat = rearrange(audio_feat, 't p d -> 1 d p t')
 
         # Paths
         npy_path = os.path.join(cache_dir, f"{voice_name}.npy")
