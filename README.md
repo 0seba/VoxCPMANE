@@ -65,6 +65,11 @@ If you place `myvoice.mp3` and `myvoice.txt` in the cache directory, the server 
 
 The full API documentation is available in [docs/API.md](docs/API.md).
 
+## Changelog
+
+### Version 0.0.3
+- Added support for creation of custom voices
+
 ## Roadmap
   - [ ] Automatic prompt caching
   - [ ] Chunked long audio generation

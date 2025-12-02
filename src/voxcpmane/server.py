@@ -30,6 +30,7 @@ from huggingface_hub import snapshot_download
 import asyncio
 from dataclasses import dataclass
 import argparse
+import ftfy
 
 try:
     from pydub import AudioSegment
@@ -326,6 +327,37 @@ def validate_voice_parameters(
             status_code=400, detail="inference_timesteps must be between 1 and 100"
         )
 
+def normalize_apple_punctuation(text):
+    """
+    Convert Apple smart/typographic punctuation to ASCII equivalents.
+    """
+    # Create translation table mapping Unicode smart chars to ASCII
+    translation_table = str.maketrans({
+        # Smart quotes
+        '\u201c': '"',  # “ (left double quote)
+        '\u201d': '"',  # ” (right double quote)
+        '\u2018': "'",  # ‘ (left single quote)
+        '\u2019': "'",  # ’ (right single quote)
+        
+        # Dashes
+        '\u2013': '-',  # – (en dash)
+        '\u2014': '-',  # — (em dash)
+        
+        # Ellipsis
+        '\u2026': '...',  # … (horizontal ellipsis)
+        
+        # Bullets and other symbols
+        '\u2022': '*',  # • (bullet)
+        '\u00a0': ' ',  # (non-breaking space)
+        
+        # Other common smart punctuation
+        '\u201a': ',',  # ‚ (single low-9 quotation mark)
+        '\u201e': '"',  # „ (double low-9 quotation mark)
+        '\u2039': '<',  # ‹ (single left-pointing angle quotation)
+        '\u203a': '>',  # › (single right-pointing angle quotation)
+    })
+    
+    return text.translate(translation_table)
 
 def generate_audio_chunks(
     text_to_generate,
@@ -374,6 +406,8 @@ def generate_audio_chunks(
             audio = None
         text = prompt_text + " " + text_to_generate
 
+    text = normalize_apple_punctuation(text)
+    text = ftfy.fix_text(text)
     text = text.replace("\n", " ").strip()
     text = re.sub(r"\s+", " ", text)
     text_token = np.array(

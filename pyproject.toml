@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxcpmane"
-version = "0.0.2"
+version = "0.0.3"
 description = "VoxCPM TTS model with Apple Neural Engine backend server"
 readme = "README.md"
 requires-python = ">=3.9,<3.13"
@@ -22,7 +22,8 @@ dependencies = [
     "wetext",
     "tqdm",
     "aiofiles",
-    "huggingface_hub"
+    "huggingface_hub",
+    "ftfy>=6.3.1",
 ]
 
 [project.urls]
