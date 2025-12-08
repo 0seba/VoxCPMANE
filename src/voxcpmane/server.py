@@ -411,7 +411,8 @@ def generate_audio_chunks(
     text = text.replace("\n", " ").strip()
     text = re.sub(r"\s+", " ", text)
     text_token = np.array(
-        model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
+        # model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
+        model.tts_model.text_tokenizer(text),
         dtype=np.int32,
     )[None, :]
 
