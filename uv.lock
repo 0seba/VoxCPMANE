@@ -1621,7 +1621,7 @@ wheels = [
 
 [[package]]
 name = "voxcpmane"
-version = "0.0.5b1"
+version = "0.0.5b2"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
