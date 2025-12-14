@@ -418,14 +418,14 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 voiceSelect.dispatchEvent(new Event('change'));
 
                 // Switch back to generate tab after a short delay
-                setTimeout(() => {
-                    switchTab('generate');
-                    createVoiceBtn.disabled = false;
-                    createVoiceBtnText.textContent = 'Create Voice';
-                    createVoiceSpinner.classList.add('hidden');
+                // setTimeout(() => {
+                //     switchTab('generate');
+                //    createVoiceBtn.disabled = false;
+                //     createVoiceBtnText.textContent = 'Create Voice';
+                //     createVoiceSpinner.classList.add('hidden');
                     // Reset form?
-                    createVoiceForm.reset();
-                }, 1500);
+                //     createVoiceForm.reset();
+                // }, 1500);
 
             } catch (error) {
                 console.error('Create voice error:', error);

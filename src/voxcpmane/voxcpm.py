@@ -307,6 +307,8 @@ class VAEEncoderANEWrapper:
         chunk_size=15_360,
         overlap_size=2560,
         hop_length=640,
+        samples_per_frame=640,
+        patch_size=2,
     ):
         self.mlmodel = mlmodel
         self.chunk_size = chunk_size
@@ -316,7 +318,8 @@ class VAEEncoderANEWrapper:
 
         # Encoder output rate (samples per frame)
         # 17920 -> 28  ⇒  17920 / 28 = 640 samples per frame
-        self.samples_per_frame = 640
+        self.samples_per_frame = samples_per_frame
+        self.patch_size = patch_size
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -325,8 +328,8 @@ class VAEEncoderANEWrapper:
         pad_to = self.hop_length
         length = audio_data.shape[-1]
         right_pad = math.ceil(length / pad_to) * pad_to - length
-        if right_pad > 0:
-            audio_data = np.pad(audio_data, ((0, 0), (0, 0), (0, right_pad)))
+        # if right_pad > 0:
+        #     audio_data = np.pad(audio_data, ((0, 0), (0, 0), (0, right_pad)))
         return audio_data
 
     def forward(self, audio_data: np.ndarray, sample_rate):
@@ -345,7 +348,7 @@ class VAEEncoderANEWrapper:
         pad_size = total_length - length
 
         if pad_size > 0:
-            audio_data = np.pad(audio_data, ((0, 0), (0, 0), (0, pad_size)))
+            audio_data = np.pad(audio_data, ((0, 0), (0, 0), (pad_size, 0)))
 
         chunks = []
         for i in range(num_steps):
@@ -358,9 +361,10 @@ class VAEEncoderANEWrapper:
         output = np.concatenate(chunks, axis=-1)
 
         if pad_size > 0:
-            pad_frames = math.ceil(pad_size / self.samples_per_frame)
+            # pad_frames = math.ceil(pad_size / self.samples_per_frame)
+            pad_frames = pad_size // (self.samples_per_frame * self.patch_size)
             if pad_frames > 0:
-                output = output[..., :-pad_frames]
+                output = output[..., pad_frames:]
 
         return output
 
@@ -603,6 +607,8 @@ class VoxCPMModelANE:
             chunk_size=audio_vae_encoder_chunk_size,
             overlap_size=audio_vae_encoder_overlap_size,
             hop_length=vae_encoder_hop_length,
+            samples_per_frame=audio_vae_chunk_size,
+            patch_size=patch_size,
         )
         self.audio_vae_decoder = AudioVAEDecoderANEWrapper(
             audio_vae_decoder_mlmodel,
@@ -1201,7 +1207,7 @@ class VoxCPMModelANE:
             -1,
             self.patch_size,
         ).transpose(1, 2, 0)
-        audio_feat = audio_feat[:-1, ...]
+        # audio_feat = audio_feat[:-1, ...]
 
         prompt_cache = {
             "text_token": text_token,
@@ -1395,7 +1401,7 @@ class VoxCPMModelANE:
                     audio_chunk = audio_data_processed[..., start:end]
                     if audio_chunk.shape[-1] < chunk_size:
                         pad_width = chunk_size - audio_chunk.shape[-1]
-                        assert (pad_width % (self.patch_size * self.chunk_size)) == 0
+                        # assert (pad_width % (self.patch_size * self.chunk_size)) == 0
                         audio_chunk = np.pad(
                             audio_chunk, ((0, 0), (0, 0), (0, pad_width))
                         )
@@ -1404,6 +1410,7 @@ class VoxCPMModelANE:
                     vae_latent = self.audio_vae_encoder.mlmodel.predict(
                         {"x": audio_chunk}
                     )["output"]
+                    print(i, length, step_size, chunk_size, audio_chunk.shape, pad_width, self.patch_size, self.chunk_size)
                     if pad_width > 0:
                         vae_latent = vae_latent[..., : pad_width // self.chunk_size]
                     vae_latent = vae_latent.reshape(
