@@ -1,5 +1,10 @@
 # VoxCPMANE
 
+**Try the beta with the VoxCPM1.5 model !!**
+```
+uv pip install voxcpmane==0.0.5b1
+```
+
 [VoxCPM TTS](https://github.com/OpenBMB/VoxCPM) model with Apple Neural Engine (ANE) backend server. CoreML models available in [Huggingface repository](https://huggingface.co/seba/VoxCPM-ANE).
 
 
