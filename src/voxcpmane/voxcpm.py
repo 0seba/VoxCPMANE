@@ -552,6 +552,7 @@ class VoxCPMModelANE:
         audio_vae_latent_dim=64,
         audio_vae_chunk_size=640,
         audio_vae_sample_rate=16_000,
+        audio_vae_encoder_overlap_size=2560,
         scale_emb=12.0,
         use_mup=False,
         # audio_vae_encoder_chunk_size=17_920,
@@ -582,7 +583,7 @@ class VoxCPMModelANE:
         self.base_lm_inference: BaseLMANEWrapperWithCache = None
         self.residual_lm_inference: BaseLMANEWrapperWithCache = None
         self.load_preprocessing_models()
-        self.load_inference_models()
+        # self.load_inference_models()
         self.feat_encoder = FeatureEncoderANEWrapper(
             feature_encoder_mlmodel, chunk_size=feature_encoder_chunk_size
         )
@@ -600,7 +601,7 @@ class VoxCPMModelANE:
             audio_vae_encoder_mlmodel,
             # chunk_size=15_360,
             chunk_size=audio_vae_encoder_chunk_size,
-            overlap_size=2_560,
+            overlap_size=audio_vae_encoder_overlap_size,
             hop_length=vae_encoder_hop_length,
         )
         self.audio_vae_decoder = AudioVAEDecoderANEWrapper(
@@ -982,7 +983,8 @@ class VoxCPMModelANE:
                     if i > 0:
                         decode_audio = decode_audio[patch_len * 2 :]
                     if stop_flag:
-                        decode_audio = decode_audio[:-1280]
+                        # decode_audio = decode_audio[:-1280]
+                        decode_audio = decode_audio
 
                     if generate_start_time is not None:
                         generate_start_time = None
@@ -1190,7 +1192,7 @@ class VoxCPMModelANE:
         patch_len = self.patch_size * self.chunk_size
         if audio.shape[1] % patch_len != 0:
             pad_width = patch_len - audio.shape[1] % patch_len
-            audio = np.pad(audio, ((0, 0), (0, pad_width)))
+            audio = np.pad(audio, ((0, 0), (pad_width, 0)))
 
         audio_feat = self.audio_vae_encoder(audio, self.sample_rate)
 
@@ -1213,7 +1215,7 @@ class VoxCPMModelANE:
             base_lm = ct.models.CompiledMLModel(
                 self.base_lm_model_path,
                 compute_units=ct.ComputeUnit.CPU_AND_NE,
-                function_name=f"length_{self.base_lm_chunk_size}",
+                # function_name=f"length_{self.base_lm_chunk_size}",
             )
             self.base_lm = BaseLMANEWrapperWithCache(
                 self.embed_tokens, base_lm, self.base_lm_chunk_size
@@ -1222,7 +1224,7 @@ class VoxCPMModelANE:
             residual_lm = ct.models.CompiledMLModel(
                 self.residual_lm_model_path,
                 compute_units=ct.ComputeUnit.CPU_AND_NE,
-                function_name=f"length_{self.residual_lm_chunk_size}",
+                # function_name=f"length_{self.residual_lm_chunk_size}",
             )
             self.residual_lm = BaseLMANEWrapperWithCache(
                 None, residual_lm, self.residual_lm_chunk_size
@@ -1272,7 +1274,7 @@ class VoxCPMModelANE:
         q_final_state = queue.Queue(maxsize=1)
 
         def _text_producer():
-            self.load_preprocessing_models()
+            # self.load_preprocessing_models()
 
             self.base_lm.reset_state()
             self.residual_lm.reset_state()
@@ -1290,7 +1292,7 @@ class VoxCPMModelANE:
                 )
 
                 fsq_output = np.zeros_like(base_lm_output[..., -1:])
-                _feat_chunk = np.zeros((1, 64, 2, 1))
+                _feat_chunk = np.zeros((1, 64, self.patch_size, 1))
 
                 keep_iter = True
                 remainder_chunk = None
@@ -1381,11 +1383,10 @@ class VoxCPMModelANE:
                     audio_data, self.sample_rate
                 )
 
+
                 length = audio_data_processed.shape[-1]
                 step_size = self.audio_vae_encoder.step_size
                 chunk_size = self.audio_vae_encoder.chunk_size
-                # chunk_size = 17920
-                # step_size = chunk_size - 2560
                 num_steps = math.ceil(length / step_size)
                 if num_steps == 0:
                     return
@@ -1410,9 +1411,9 @@ class VoxCPMModelANE:
                     )
                     vae_latent = vae_latent.transpose(0, 1, 3, 2)
                     if i > 0:
-                        vae_latent = [vae_latent[..., 2:]]
+                        vae_latent = [vae_latent[..., self.patch_size:]]
                     else:
-                        vae_latent = [vae_latent[..., :2], vae_latent[..., 2:]]
+                        vae_latent = [vae_latent[..., :self.patch_size], vae_latent[..., self.patch_size:]]
 
                     for chunk in vae_latent:
                         q_audio_vae_out.put(chunk)
@@ -1457,7 +1458,8 @@ class VoxCPMModelANE:
             last_iter = i == (max_len - 1)
             # slightly shorter first iter for faster ttft
             # if streaming and (len(pred_feat_seq) == 12 or (len(pred_feat_seq) == 7 and is_first_iter)):
-            if streaming and (len(pred_feat_seq) == 12 or stop or last_iter):
+            # if streaming and (len(pred_feat_seq) == 12 or stop or last_iter):
+            if streaming and (len(pred_feat_seq) == 6 or stop or last_iter):
                 is_first_iter = False
                 pred_feat_chunk = np.concatenate(pred_feat_seq, axis=1)
                 feat_pred = rearrange(
@@ -1512,12 +1514,18 @@ class VoxCPMANE:
         audio_vae_encoder_chunk_size=15_360,
         feature_encoder_chunk_size=12,
         fsq_layer_chunk_size=32,
+        patch_size=2,
+        audio_vae_chunk_size=2560,
+        audio_vae_sample_rate=16_000,
+        audio_vae_encoder_overlap_size=2560,
     ):
         print(
             f"voxcpm_model_path: {voxcpm_model_path}, zipenhancer_model_path: {zipenhancer_model_path}, enable_denoiser: {enable_denoiser}"
         )
-        self.tts_model = VoxCPMModelANE.from_local(
-            voxcpm_model_path,
+        tokenizer = LlamaTokenizerFast.from_pretrained(voxcpm_model_path)
+        # self.tts_model = VoxCPMModelANE.from_local(
+        self.tts_model = VoxCPMModelANE(
+            tokenizer,
             base_lm_mlmodel,
             fsq_mlmodel,
             locdit_mlmodel,
@@ -1533,6 +1541,10 @@ class VoxCPMANE:
             audio_vae_encoder_chunk_size=audio_vae_encoder_chunk_size,
             feature_encoder_chunk_size=feature_encoder_chunk_size,
             fsq_layer_chunk_size=fsq_layer_chunk_size,
+            patch_size=patch_size,
+            audio_vae_chunk_size=audio_vae_chunk_size,
+            audio_vae_sample_rate=audio_vae_sample_rate,
+            audio_vae_encoder_overlap_size=audio_vae_encoder_overlap_size,
         )
         self.text_normalizer = TextNormalizer()
         if enable_denoiser and zipenhancer_model_path is not None:

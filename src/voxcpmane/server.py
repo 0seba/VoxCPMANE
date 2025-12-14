@@ -41,7 +41,7 @@ except ImportError:
     PYDUB_AVAILABLE = False
 
 
-REPO_ID = "seba/VoxCPM-ANE"
+REPO_ID = "seba/VoxCPM1.5-ANE"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
 CUSTOM_VOICE_CACHE_DIR = os.path.expanduser("~/.cache/ane_tts")
@@ -129,8 +129,12 @@ try:
         enable_denoiser=False,
         base_lm_chunk_size=lm_length,
         residual_lm_chunk_size=lm_length,
-        audio_vae_encoder_chunk_size=23040,
+        audio_vae_encoder_chunk_size=1764 * 4 * (8 + 1),
         feature_encoder_chunk_size=16,
+        patch_size=4,
+        audio_vae_chunk_size=1764,
+        audio_vae_sample_rate=44100,
+        audio_vae_encoder_overlap_size=1764 * 4,
     )
     print("✅ Models loaded successfully.")
 
@@ -205,7 +209,7 @@ def generation_worker():
             time.sleep(1)
 
 
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 44_100
 app = FastAPI(title="OpenAI Compatible TTS Server")
 CACHED_VOICE_TEXT = """Jittery Jack's jam jars jiggled jauntily, jolting Jack's jumbled jelly-filled jars joyously.
 Cindy's circular cymbals clanged cheerfully, clashing crazily near Carla's crashing crockery.
