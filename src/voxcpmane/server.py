@@ -421,10 +421,10 @@ def generate_audio_chunks(
     )[None, :]
 
     if audio is not None:
-        patch_len = model.tts_model.patch_size * model.tts_model.chunk_size
-        if audio.shape[1] % patch_len != 0:
-            pad_width = patch_len - audio.shape[1] % patch_len
-            audio = np.pad(audio, ((0, 0), (0, pad_width)))
+        # patch_len = model.tts_model.patch_size * model.tts_model.chunk_size
+        # if audio.shape[1] % patch_len != 0:
+        #     pad_width = patch_len - audio.shape[1] % patch_len
+        #     audio = np.pad(audio, ((0, 0), (0, pad_width)))
         audio = audio[None, :]
 
     try:

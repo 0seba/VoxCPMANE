@@ -339,7 +339,6 @@ class VAEEncoderANEWrapper:
         # audio_data = self.preprocess(audio_data, sample_rate)
         audio_data = audio_data.astype(np.float32)
         *_, length = audio_data.shape
-        print(audio_data.shape)
 
         if length == self.chunk_size:
             return self.mlmodel.predict({"x": audio_data})["output"]
@@ -347,7 +346,6 @@ class VAEEncoderANEWrapper:
         num_steps = math.ceil((length - self.overlap_size) / self.step_size)
         total_length = (num_steps - 1) * self.step_size + self.chunk_size
         pad_size = total_length - length
-        print(num_steps, total_length, pad_size, self.step_size, self.chunk_size)
 
         if pad_size > 0:
             audio_data = np.pad(audio_data, ((0, 0), (0, 0), (pad_size, 0)))
@@ -361,7 +359,6 @@ class VAEEncoderANEWrapper:
             chunks.append(output)
 
         output = np.concatenate(chunks, axis=-1)
-        print(output.shape)
 
         # if pad_size > 0:
             # pad_frames = math.ceil(pad_size / self.samples_per_frame)
@@ -1206,8 +1203,12 @@ class VoxCPMModelANE:
         #     audio = np.pad(audio, ((0, 0), (pad_width, 0)))
 
         audio_feat, pad_frames = self.audio_vae_encoder(audio, self.sample_rate)
-        pad_size = (audio_feat.shape[-1] - pad_frames) % self.patch_size
-        if pad_frames > 0:
+        non_pad_frames = audio_feat.shape[-1] - pad_frames
+        if non_pad_frames % self.patch_size != 0:
+            pad_size = self.patch_size - (non_pad_frames % self.patch_size)
+        else:
+            pad_size = 0
+        if pad_frames > 0 and pad_size > 0:
             audio_feat = audio_feat[..., max(0, pad_frames - pad_size):]
         if audio_feat.shape[-1] % self.patch_size != 0:
             pad_size = self.patch_size - (audio_feat.shape[-1] % self.patch_size)
@@ -1404,34 +1405,53 @@ class VoxCPMModelANE:
                 length = audio_data_processed.shape[-1]
                 step_size = self.audio_vae_encoder.step_size
                 chunk_size = self.audio_vae_encoder.chunk_size
-                num_steps = math.ceil(length / step_size)
+                # num_steps = math.ceil(length / step_size)
+
+                num_steps = math.ceil((length - self.audio_vae_encoder.overlap_size) / step_size)
+                total_length = (num_steps - 1) * step_size + chunk_size
+                pad_size = total_length - length
+
+                if pad_size > 0:
+                    audio_data_processed = np.pad(audio_data_processed, ((0, 0), (0, 0), (pad_size, 0)))
+
                 if num_steps == 0:
                     return
                 for i in range(num_steps):
                     start, end = i * step_size, i * step_size + chunk_size
                     audio_chunk = audio_data_processed[..., start:end]
-                    if audio_chunk.shape[-1] < chunk_size:
-                        pad_width = chunk_size - audio_chunk.shape[-1]
-                        # assert (pad_width % (self.patch_size * self.chunk_size)) == 0
-                        audio_chunk = np.pad(
-                            audio_chunk, ((0, 0), (0, 0), (0, pad_width))
-                        )
-                    else:
-                        pad_width = 0
                     vae_latent = self.audio_vae_encoder.mlmodel.predict(
                         {"x": audio_chunk}
                     )["output"]
-                    print(i, length, step_size, chunk_size, audio_chunk.shape, pad_width, self.patch_size, self.chunk_size)
-                    if pad_width > 0:
-                        vae_latent = vae_latent[..., : pad_width // self.chunk_size]
+
+
+                    if i == 0 and pad_size > 0:
+                        pad_frames = pad_size // self.audio_vae_encoder.samples_per_frame
+                        non_pad_frames = vae_latent.shape[-1] - pad_frames
+                        if non_pad_frames % self.patch_size != 0:
+                            pad_size = self.patch_size - (non_pad_frames % self.patch_size)
+                        else:
+                            pad_size = 0
+                        if pad_frames > 0:
+                            vae_latent = vae_latent[..., max(0, pad_frames - pad_size):]
+                        if vae_latent.shape[-1] % self.patch_size != 0:
+                            pad_size = self.patch_size - (vae_latent.shape[-1] % self.patch_size)
+
                     vae_latent = vae_latent.reshape(
                         1, self.audio_vae_latent_dim, -1, self.patch_size
                     )
                     vae_latent = vae_latent.transpose(0, 1, 3, 2)
                     if i > 0:
-                        vae_latent = [vae_latent[..., self.patch_size:]]
+                        # vae_latent = [vae_latent[..., self.patch_size:]]
+                        vae_latent = [vae_latent[..., 1:]]
                     else:
-                        vae_latent = [vae_latent[..., :self.patch_size], vae_latent[..., self.patch_size:]]
+                        # vae_latent = [vae_latent[..., :self.patch_size], vae_latent[..., self.patch_size:]]
+                        if vae_latent.shape[-2] > 16:
+                            vae_latent = [
+                                vae_latent[..., :16],
+                                vae_latent[..., 16:],
+                            ]
+                        else:
+                            vae_latent = [vae_latent]
 
                     for chunk in vae_latent:
                         q_audio_vae_out.put(chunk)
