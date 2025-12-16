@@ -1195,7 +1195,9 @@ class VoxCPMModelANE:
             # audio = signal.resample_poly(audio, self.sample_rate, sr,
             #                        window=('kaiser', 8.0),
             #                        padtype='constant', cval=0.0, axis=1)
-            audio = soxr.resample(audio, sr, self.sample_rate, quality="HQ")[None, :]
+            audio = soxr.resample(audio, sr, self.sample_rate, quality="HQ")
+
+        audio = audio.reshape(1, 1, -1)
 
         # patch_len = self.patch_size * self.chunk_size
         # if audio.shape[1] % patch_len != 0:

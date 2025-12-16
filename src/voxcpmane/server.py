@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import time
 import threading
 import traceback
@@ -373,7 +374,6 @@ def generate_audio_chunks(
     inference_timesteps=10,
     cancellation_event: threading.Event = None,
 ):
-    import re
 
     if cancellation_event is None:
         cancellation_event = threading.Event()
@@ -411,8 +411,11 @@ def generate_audio_chunks(
         text = prompt_text + " " + text_to_generate
 
     text = normalize_apple_punctuation(text)
+    text = text.strip("\n")
+    text = text.strip()
+    text = text.strip("\n")
     text = ftfy.fix_text(text)
-    text = text.replace("\n", " ").strip()
+    text = text.replace(r"\n+", "\n").strip()
     text = re.sub(r"\s+", " ", text)
     text_token = np.array(
         # model.tts_model.text_tokenizer(model.text_normalizer.normalize(text)),
@@ -941,10 +944,18 @@ async def create_voice(request: CreateVoiceRequest):
         )
 
     try:
+        text = prompt_text
+        text = normalize_apple_punctuation(text)
+        text = text.strip("\n")
+        text = text.strip()
+        text = text.strip("\n")
+        text = ftfy.fix_text(text)
+        text = text.replace(r"\n+", "\n").strip()
+        text = re.sub(r"\s+", " ", text)
         model.create_custom_voice(
             voice_name=voice_name,
             prompt_wav_path=request.prompt_wav_path,
-            prompt_text=prompt_text,
+            prompt_text=text,
             cache_dir=CUSTOM_VOICE_CACHE_DIR,
         )
         return {
