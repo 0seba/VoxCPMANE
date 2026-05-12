@@ -1,21 +1,21 @@
 # Agent Instructions
 
-This repository contains the source code for the **VoxCPMANE2** package, the canonical VoxCPM2 TTS runtime and HTTP server using CoreML and Apple Neural Engine.
+This repository contains the source code for the **VoxCPMANE** package, the canonical VoxCPM2 TTS runtime and HTTP server using CoreML and Apple Neural Engine.
 
 ## Project Overview
 
-*   **Core Purpose**: A pip-installable package (`voxcpmane2`) providing:
+*   **Core Purpose**: A pip-installable package (`voxcpmane`) providing:
     1. Pure numpy/CoreML runtime wrappers for VoxCPM2 model components (LM, LocDiT, FeatEncoder, AudioVAE).
     2. A `VoxCPM2Generator` class orchestrating the full TTS pipeline.
-    3. A FastAPI HTTP server (`voxcpmane2.server`) serving TTS via OpenAI-compatible endpoints.
+    3. A FastAPI HTTP server (`voxcpmane.server`) serving TTS via OpenAI-compatible endpoints.
 *   **Key Dependencies**:
     *   `coremltools`: For running the ML models on macOS Apple Silicon.
     *   `sounddevice`: For audio playback.
     *   `fastapi`, `uvicorn`: Web server.
     *   `transformers`: Tokenization.
 *   **Structure**:
-    *   `src/voxcpmane2/`: Source code.
-    *   `src/voxcpmane2/frontend/`: Static frontend assets.
+    *   `src/voxcpmane/`: Source code.
+    *   `src/voxcpmane/frontend/`: Static frontend assets.
 
 ## ⚠️ Environment & Testing Limitations
 
@@ -49,5 +49,5 @@ The following modules **must** be mocked in any test script you write:
 ## Architecture Note
 
 This package is the **canonical home** for VoxCPM2 runtime modules. The parent
-repository (`qeml`) imports from `voxcpmane2` via thin re-export shims in
+repository (`qeml`) imports from `voxcpmane` via thin re-export shims in
 `src/qeml/voxcpm2/`. Do not duplicate runtime code back into `qeml`.

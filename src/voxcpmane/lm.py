@@ -27,7 +27,7 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import coremltools as ct
 import numpy as np
 
-log = logging.getLogger("voxcpmane2.lm")
+log = logging.getLogger("voxcpmane.lm")
 
 PathLike = Union[str, Path]
 

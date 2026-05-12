@@ -18,7 +18,7 @@ import numpy as np
 import soundfile as sf
 from safetensors import safe_open
 
-log = logging.getLogger("voxcpmane2.generator")
+log = logging.getLogger("voxcpmane.generator")
 
 from .audio_vae_decoder import AudioVAEDecoder
 from .audio_vae_encoder import AudioVAEEncoder
