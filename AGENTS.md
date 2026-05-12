@@ -1,19 +1,21 @@
 # Agent Instructions
 
-This repository contains the source code for the **VoxCPMANE** server, a text-to-speech system using CoreML and Apple Neural Engine. This file provides critical instructions for AI agents working on this codebase.
+This repository contains the source code for the **VoxCPMANE2** package, the canonical VoxCPM2 TTS runtime and HTTP server using CoreML and Apple Neural Engine.
 
 ## Project Overview
 
-*   **Core Purpose**: A FastAPI server (`src/voxcpmane/server.py`) that serves a VoxCPM TTS model.
+*   **Core Purpose**: A pip-installable package (`voxcpmane2`) providing:
+    1. Pure numpy/CoreML runtime wrappers for VoxCPM2 model components (LM, LocDiT, FeatEncoder, AudioVAE).
+    2. A `VoxCPM2Generator` class orchestrating the full TTS pipeline.
+    3. A FastAPI HTTP server (`voxcpmane2.server`) serving TTS via OpenAI-compatible endpoints.
 *   **Key Dependencies**:
     *   `coremltools`: For running the ML models on macOS Apple Silicon.
     *   `sounddevice`: For audio playback.
     *   `fastapi`, `uvicorn`: Web server.
-    *   `transformers`: Tokenization and model utilities.
+    *   `transformers`: Tokenization.
 *   **Structure**:
-    *   `src/voxcpmane/`: Source code.
-    *   `src/voxcpmane/frontend/`: Static frontend assets (served by FastAPI).
-    *   `docs/`: Documentation.
+    *   `src/voxcpmane2/`: Source code.
+    *   `src/voxcpmane2/frontend/`: Static frontend assets.
 
 ## ⚠️ Environment & Testing Limitations
 
@@ -30,56 +32,6 @@ The following modules **must** be mocked in any test script you write:
 4.  `soxr`
 5.  `huggingface_hub.snapshot_download` (to prevent large model downloads during tests)
 
-#### Example Mock Setup
-
-Use this pattern at the top of your test scripts *before* importing any project modules:
-
-```python
-import sys
-from unittest.mock import MagicMock
-import types
-
-# Helper for module mocking
-def create_mock_module(name):
-    m = types.ModuleType(name)
-    m.__spec__ = MagicMock()
-    m.__spec__.origin = "mock"
-    m.__file__ = "mock"
-    return m
-
-# Mock hardware dependencies
-sys.modules["sounddevice"] = create_mock_module("sounddevice")
-sys.modules["soundfile"] = create_mock_module("soundfile")
-sys.modules["soxr"] = create_mock_module("soxr")
-
-coremltools = create_mock_module("coremltools")
-coremltools.models = MagicMock()
-sys.modules["coremltools"] = coremltools
-sys.modules["coremltools.models"] = coremltools.models
-
-# Mock HuggingFace downloads
-import huggingface_hub
-huggingface_hub.snapshot_download = MagicMock(return_value="/tmp/mock_model_path")
-
-# Mock numpy.load to handle fake model files
-import numpy as np
-original_load = np.load
-def mock_load(file, *args, **kwargs):
-    if str(file).endswith(".npy"):
-        return np.zeros((1, 1))
-    return original_load(file, *args, **kwargs)
-np.load = mock_load
-
-# Mock os path checks for model files
-import os
-original_exists = os.path.exists
-def mock_exists(path):
-    if "/tmp/mock_model_path" in str(path):
-        return True
-    return original_exists(path)
-os.path.exists = mock_exists
-```
-
 ## Workflow & Expectations
 
 1.  **Scope of Work**: You are expected to implement new features, fix bugs, and add tests.
@@ -94,12 +46,8 @@ os.path.exists = mock_exists
 *   **Formatter**: You **MUST** use `black` for code formatting.
 *   **Run Black**: `uv run black .` before submitting any changes.
 
-## Documentation
+## Architecture Note
 
-*   **API Changes**: The API documentation is located in `docs/API.md`. If you modify endpoints or request/response structures, you **MUST** update this file.
-*   **README**: If you add major features, update `README.md` to reflect them (linking to `docs/API.md` for details).
-
-## Directory Structure
-
-*   Do not edit build artifacts or files in `dist/` or `build/`.
-*   Frontend files are in `src/voxcpmane/frontend/`. If you modify `index.html`, ensure the server serves it correctly.
+This package is the **canonical home** for VoxCPM2 runtime modules. The parent
+repository (`qeml`) imports from `voxcpmane2` via thin re-export shims in
+`src/qeml/voxcpm2/`. Do not duplicate runtime code back into `qeml`.

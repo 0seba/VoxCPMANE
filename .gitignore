@@ -1,3 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+# Build/cache
+build/
+dist/
+.cache/
+
+# Models/generated artifacts
+*.mlpackage/
+*.mlmodelc/
+*.mlmodel
+
+# macOS
+.DS_Store
+._*
+
 # Python-generated files
 __pycache__/
 *.py[oc]
