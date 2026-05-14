@@ -374,6 +374,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Sample-Rate"],
 )
 
 
@@ -467,6 +468,12 @@ def normalize_apple_punctuation(text):
         '\u2039': '<', '\u203a': '>',
     })
     return text.translate(table)
+
+
+def audio_float_to_int16(audio: np.ndarray) -> np.ndarray:
+    """Convert float audio to PCM16 without wrapping out-of-range samples."""
+    audio_arr = np.asarray(audio, dtype=np.float32)
+    return (np.clip(audio_arr, -1.0, 1.0) * 32767.0).astype(np.int16)
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +734,7 @@ async def create_speech(request: SpeechRequest):
         soundfile.write(buffer, full_audio, SAMPLE_RATE, format=audio_format)
         media_type = f"audio/{audio_format}"
     else:
-        pcm = (full_audio * 32767).astype(np.int16)
+        pcm = audio_float_to_int16(full_audio)
         seg = AudioSegment(data=pcm.tobytes(), sample_width=2, frame_rate=SAMPLE_RATE, channels=1)
         fmt_map = {"mp3": ("mp3", "audio/mpeg"), "opus": ("opus", "audio/opus"),
                     "ogg": ("ogg", "audio/ogg"), "aac": ("adts", "audio/aac")}
@@ -752,7 +759,7 @@ async def stream_speech(request: SpeechRequest):
     async def audio_stream():
         try:
             async for chunk in poll_queue_for_chunks(job.output_queue):
-                yield (chunk * 32767).astype(np.int16).tobytes()
+                yield audio_float_to_int16(chunk).tobytes()
         finally:
             job.cancel_event.set()
 

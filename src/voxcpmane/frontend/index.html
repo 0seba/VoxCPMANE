@@ -258,18 +258,23 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         let streamReader;
         let nextStartTime = 0; // Time at which the next audio chunk should start playing
         let isPlaying = false;
-        let sampleRate = 16000; // Default, will try to get from header
+        let sampleRate = 48000; // Default, will try to get from header
         let streamQueue = [];
         let queuedAudioDuration = 0;
         let streamEnded = false;
         let playbackStarted = false;
         let schedulerTimer = null;
         let pendingPcmBytes = new Uint8Array(0);
+        let fadeInNextChunk = false;
+        let pendingSamples = new Float32Array(0);
+        let streamPlayerNode = null;
+        let useAudioWorkletPlayback = false;
+        let streamPlayerEndSent = false;
+        let streamPlayerModuleUrl = null;
 
         const INITIAL_STREAM_BUFFER_SECONDS = 0.6;
         const TARGET_SCHEDULE_AHEAD_SECONDS = 1.2;
         const RESTART_DELAY_SECONDS = 0.08;
-        const UNDERRUN_GRACE_SECONDS = 0.015;
         const FADE_SECONDS = 0.005;
         
         // --- Array to store audio chunks for final playback ---
@@ -381,6 +386,18 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 
                 streamReader = null;
                 clearSchedulerTimer();
+                if (streamPlayerNode) {
+                    try {
+                        streamPlayerNode.disconnect();
+                    } catch (e) {
+                        console.warn('Could not disconnect stream player:', e);
+                    }
+                    streamPlayerNode = null;
+                }
+                if (streamPlayerModuleUrl) {
+                    URL.revokeObjectURL(streamPlayerModuleUrl);
+                    streamPlayerModuleUrl = null;
+                }
             }
         }
         
@@ -432,6 +449,193 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
         }
 
+        async function initializeStreamPlayer() {
+            useAudioWorkletPlayback = false;
+            streamPlayerNode = null;
+            streamPlayerEndSent = false;
+
+            if (!audioContext || !audioContext.audioWorklet) {
+                return;
+            }
+
+            const workletSource = `
+                class PcmStreamPlayer extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        this.queue = [];
+                        this.readIndex = 0;
+                        this.started = false;
+                        this.ended = false;
+                        this.endedPosted = false;
+                        this.inSilence = true;
+                        this.lastSample = 0;
+                        this.fadeFrames = Math.max(1, Math.floor(sampleRate * 0.005));
+                        this.fadeInRemaining = 0;
+                        this.fadeOutRemaining = 0;
+                        this.fadeOutTotal = this.fadeFrames;
+                        this.fadeOutStart = 0;
+                        this.playedSinceReport = 0;
+
+                        this.port.onmessage = (event) => {
+                            const message = event.data || {};
+                            if (message.type === 'samples' && message.samples) {
+                                this.queue.push(message.samples);
+                            } else if (message.type === 'start') {
+                                this.started = true;
+                            } else if (message.type === 'end') {
+                                this.ended = true;
+                            }
+                        };
+                    }
+
+                    nextSample() {
+                        while (this.queue.length > 0) {
+                            const current = this.queue[0];
+                            if (this.readIndex < current.length) {
+                                return current[this.readIndex++];
+                            }
+                            this.queue.shift();
+                            this.readIndex = 0;
+                        }
+                        return null;
+                    }
+
+                    reportPlayed(force = false) {
+                        if (this.playedSinceReport >= 2048 || (force && this.playedSinceReport > 0)) {
+                            this.port.postMessage({
+                                type: 'played',
+                                frames: this.playedSinceReport,
+                            });
+                            this.playedSinceReport = 0;
+                        }
+                    }
+
+                    process(inputs, outputs) {
+                        const output = outputs[0][0];
+                        if (!this.started) {
+                            output.fill(0);
+                            return true;
+                        }
+
+                        for (let i = 0; i < output.length; i++) {
+                            const sample = this.nextSample();
+                            if (sample !== null) {
+                                if (this.inSilence || this.fadeOutRemaining > 0) {
+                                    this.fadeInRemaining = this.fadeFrames;
+                                    this.fadeOutRemaining = 0;
+                                    this.inSilence = false;
+                                }
+
+                                let gain = 1;
+                                if (this.fadeInRemaining > 0) {
+                                    gain = 1 - (this.fadeInRemaining / this.fadeFrames);
+                                    this.fadeInRemaining--;
+                                }
+                                output[i] = sample * gain;
+                                this.lastSample = sample;
+                                this.playedSinceReport++;
+                                continue;
+                            }
+
+                            if (!this.inSilence) {
+                                if (this.fadeOutRemaining === 0) {
+                                    this.fadeOutRemaining = this.fadeFrames;
+                                    this.fadeOutTotal = this.fadeFrames;
+                                    this.fadeOutStart = this.lastSample;
+                                    this.port.postMessage({ type: this.ended ? 'ending' : 'underrun' });
+                                }
+
+                                if (this.fadeOutRemaining > 0) {
+                                    output[i] = this.fadeOutStart * (this.fadeOutRemaining / this.fadeOutTotal);
+                                    this.fadeOutRemaining--;
+                                    if (this.fadeOutRemaining === 0) {
+                                        this.inSilence = true;
+                                    }
+                                } else {
+                                    output[i] = 0;
+                                    this.inSilence = true;
+                                }
+                            } else {
+                                output[i] = 0;
+                            }
+
+                            if (this.ended && this.inSilence && !this.endedPosted) {
+                                this.reportPlayed(true);
+                                this.port.postMessage({ type: 'ended' });
+                                this.endedPosted = true;
+                            }
+                        }
+
+                        this.reportPlayed();
+                        return true;
+                    }
+                }
+
+                registerProcessor('pcm-stream-player', PcmStreamPlayer);
+            `;
+
+            streamPlayerModuleUrl = URL.createObjectURL(
+                new Blob([workletSource], { type: 'application/javascript' })
+            );
+
+            try {
+                await audioContext.audioWorklet.addModule(streamPlayerModuleUrl);
+                streamPlayerNode = new AudioWorkletNode(audioContext, 'pcm-stream-player');
+                streamPlayerNode.port.onmessage = handleStreamPlayerMessage;
+                streamPlayerNode.connect(audioContext.destination);
+                useAudioWorkletPlayback = true;
+            } catch (error) {
+                console.warn('AudioWorklet unavailable, falling back to buffer scheduler:', error);
+                if (streamPlayerModuleUrl) {
+                    URL.revokeObjectURL(streamPlayerModuleUrl);
+                    streamPlayerModuleUrl = null;
+                }
+                streamPlayerNode = null;
+            }
+        }
+
+        function handleStreamPlayerMessage(event) {
+            const message = event.data || {};
+            if (message.type === 'played') {
+                queuedAudioDuration = Math.max(
+                    0,
+                    queuedAudioDuration - (message.frames / sampleRate)
+                );
+            } else if (message.type === 'underrun') {
+                playButtonText.textContent = 'Buffering...';
+            } else if (message.type === 'ending') {
+                playButtonText.textContent = 'Finishing...';
+            } else if (message.type === 'ended') {
+                finishStreamPlayback();
+            }
+        }
+
+        function disableWorkletPlayback(reason) {
+            console.warn(reason);
+            useAudioWorkletPlayback = false;
+            if (streamPlayerNode) {
+                try {
+                    streamPlayerNode.disconnect();
+                } catch (e) {
+                    console.warn('Could not disconnect stream player:', e);
+                }
+                streamPlayerNode = null;
+            }
+            if (streamPlayerModuleUrl) {
+                URL.revokeObjectURL(streamPlayerModuleUrl);
+                streamPlayerModuleUrl = null;
+            }
+        }
+
+        function flushPendingSamples() {
+            if (pendingSamples.length > 0) {
+                streamQueue.push(pendingSamples);
+                queuedAudioDuration += pendingSamples.length / sampleRate;
+                pendingSamples = new Float32Array(0);
+                scheduleBufferedAudio();
+            }
+        }
+
         function resetStreamPlaybackState() {
             clearSchedulerTimer();
             streamQueue = [];
@@ -440,12 +644,29 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             playbackStarted = false;
             pendingPcmBytes = new Uint8Array(0);
             nextStartTime = 0;
+            fadeInNextChunk = false;
+            pendingSamples = new Float32Array(0);
+            streamPlayerEndSent = false;
         }
 
         function enqueueStreamChunk(pcm32Data) {
-            streamQueue.push(pcm32Data);
-            queuedAudioDuration += pcm32Data.length / sampleRate;
-            scheduleBufferedAudio();
+            if (pendingSamples.length > 0) {
+                const merged = new Float32Array(pendingSamples.length + pcm32Data.length);
+                merged.set(pendingSamples, 0);
+                merged.set(pcm32Data, pendingSamples.length);
+                pendingSamples = merged;
+            } else {
+                pendingSamples = pcm32Data;
+            }
+
+            const chunkSize = 7680;
+            while (pendingSamples.length >= chunkSize) {
+                const chunk = pendingSamples.slice(0, chunkSize);
+                pendingSamples = pendingSamples.slice(chunkSize);
+                streamQueue.push(chunk);
+                queuedAudioDuration += chunk.length / sampleRate;
+                scheduleBufferedAudio();
+            }
         }
 
         function pcmBytesToFloat32(value) {
@@ -497,6 +718,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 return;
             }
 
+            if (useAudioWorkletPlayback && streamPlayerNode) {
+                scheduleWorkletAudio();
+                return;
+            }
+
             if (!playbackStarted) {
                 if (!streamEnded && queuedAudioDuration < INITIAL_STREAM_BUFFER_SECONDS) {
                     playButtonText.textContent = 'Buffering...';
@@ -507,9 +733,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 playButtonText.textContent = 'Playing...';
             }
 
-            let fadeInNextChunk = false;
-            const minimumStartTime = audioContext.currentTime + UNDERRUN_GRACE_SECONDS;
-            if (nextStartTime < minimumStartTime) {
+            if (nextStartTime < audioContext.currentTime) {
                 nextStartTime = audioContext.currentTime + RESTART_DELAY_SECONDS;
                 fadeInNextChunk = true;
             }
@@ -534,6 +758,57 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
 
             if (!streamEnded || streamQueue.length > 0) {
                 schedulerTimer = setTimeout(scheduleBufferedAudio, 50);
+            }
+        }
+
+        function scheduleWorkletAudio() {
+            while (streamQueue.length > 0 && streamPlayerNode) {
+                const samples = streamQueue.shift();
+                const samplesForWorklet = new Float32Array(samples);
+                streamPlayerNode.port.postMessage(
+                    { type: 'samples', samples: samplesForWorklet },
+                    [samplesForWorklet.buffer]
+                );
+            }
+
+            if (!playbackStarted) {
+                if (!streamEnded && queuedAudioDuration < INITIAL_STREAM_BUFFER_SECONDS) {
+                    playButtonText.textContent = 'Buffering...';
+                    return;
+                }
+                playbackStarted = true;
+                playButtonText.textContent = 'Playing...';
+                streamPlayerNode.port.postMessage({ type: 'start' });
+            } else if (!streamEnded) {
+                playButtonText.textContent = 'Playing...';
+            }
+
+            if (streamEnded && !streamPlayerEndSent) {
+                streamPlayerEndSent = true;
+                streamPlayerNode.port.postMessage({ type: 'end' });
+            }
+        }
+
+        function finishStreamPlayback() {
+            if (streamPlayerNode) {
+                try {
+                    streamPlayerNode.disconnect();
+                } catch (e) {
+                    console.warn('Could not disconnect stream player:', e);
+                }
+                streamPlayerNode = null;
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close().then(() => console.log('AudioContext closed after finishing.'));
+                audioContext = null;
+            }
+            if (streamPlayerModuleUrl) {
+                URL.revokeObjectURL(streamPlayerModuleUrl);
+                streamPlayerModuleUrl = null;
+            }
+            if (isPlaying) {
+                showStatus('Playback finished.', 'success');
+                setPlayingState(false);
             }
         }
 
@@ -629,7 +904,13 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             setPlayingState(true);
 
             try {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                try {
+                    audioContext = new AudioContextClass({ sampleRate });
+                } catch (e) {
+                    audioContext = new AudioContextClass();
+                }
+                await initializeStreamPlayer();
                 console.log('AudioContext started, state:', audioContext.state);
             } catch (e) {
                 console.error('Error creating AudioContext:', e);
@@ -659,6 +940,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 if (headerSampleRate) {
                     sampleRate = parseInt(headerSampleRate, 10);
                     console.log('Using sample rate from header:', sampleRate);
+                    if (useAudioWorkletPlayback && audioContext && audioContext.sampleRate !== sampleRate) {
+                        disableWorkletPlayback(
+                            `AudioContext is running at ${audioContext.sampleRate}Hz; stream is ${sampleRate}Hz.`
+                        );
+                    }
                 } else {
                     console.warn(`No X-Sample-Rate header found, defaulting to ${sampleRate}Hz.`);
                 }
@@ -798,10 +1084,15 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 if (done) {
                     streamEnded = true;
                     console.log('Stream download finished. Waiting for playback to complete.');
+                    flushPendingSamples();
                     
                     if (audioContext && audioContext.state !== 'closed' && isPlaying) {
                         scheduleBufferedAudio();
                         buildFinalAudio(); 
+
+                        if (useAudioWorkletPlayback && streamPlayerNode) {
+                            return;
+                        }
 
                         const remainingTimeInSeconds = nextStartTime - audioContext.currentTime;
                         const delayInMs = Math.max(0, remainingTimeInSeconds * 1000) + 250;
