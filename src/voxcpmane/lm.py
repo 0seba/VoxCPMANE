@@ -15,60 +15,26 @@ is imported lazily and outputs are returned on the original device/dtype.
 
 from __future__ import annotations
 
-import json
 import logging
-import math
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import coremltools as ct
 import numpy as np
 
+from ._coreml_utils import (
+    PathLike,
+    is_compiled_model_path,
+    load_compiled_metadata_entry,
+    load_coreml_model,
+    parse_shape_text,
+    select_chunk_size,
+)
+
 log = logging.getLogger("voxcpmane.lm")
-
-PathLike = Union[str, Path]
-
-
-def _is_compiled_model_path(path: PathLike) -> bool:
-    return Path(path).suffix == ".mlmodelc"
-
-
-def _parse_shape_text(shape_text: str) -> Tuple[int, ...]:
-    return tuple(int(d.strip()) for d in shape_text.strip("[]").split(",") if d.strip())
-
-
-def _load_coreml_model(
-    path: PathLike,
-    *,
-    compute_units: ct.ComputeUnit,
-    function_name: Optional[str] = None,
-) -> Any:
-    model_path = str(path)
-    if _is_compiled_model_path(model_path):
-        return ct.models.CompiledMLModel(
-            model_path,
-            compute_units=compute_units,
-            function_name=function_name,
-        )
-    return ct.models.MLModel(
-        model_path,
-        compute_units=compute_units,
-        function_name=function_name,
-    )
-
-
-def _load_compiled_metadata_entry(path: PathLike) -> dict:
-    model_path = Path(path)
-    metadata_path = model_path / "metadata.json"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"missing compiled metadata file: {metadata_path}")
-    raw = json.loads(metadata_path.read_text())
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"unexpected metadata format in {metadata_path}")
-    return raw[0]
 
 
 class _RuntimeKVCache:
@@ -109,8 +75,8 @@ class CoreMLMiniCPMLM:
         self.compute_units = compute_units
         spec = None
         metadata = None
-        if _is_compiled_model_path(self.model_path):
-            metadata = _load_compiled_metadata_entry(self.model_path)
+        if is_compiled_model_path(self.model_path):
+            metadata = load_compiled_metadata_entry(self.model_path)
             default_function_name = "main"
         else:
             spec_model = ct.models.MLModel(self.model_path, skip_model_load=True)
@@ -141,10 +107,10 @@ class CoreMLMiniCPMLM:
             if position_desc is None:
                 raise ValueError("model has no 'position_id' input")
             seed_desc = next((i for i in input_schema if i.get("name") == "position_index_seed"), None)
-            shape = _parse_shape_text(x_desc["shape"])
-            self.position_id_shape = _parse_shape_text(position_desc["shape"])
+            shape = parse_shape_text(x_desc["shape"])
+            self.position_id_shape = parse_shape_text(position_desc["shape"])
             self.position_index_seed_shape = (
-                _parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
+                parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
             )
         else:
             model_desc = self._description_for_function(spec, default_function_name)
@@ -215,7 +181,7 @@ class CoreMLMiniCPMLM:
                         f"available: {sorted(self._function_names_by_chunk_size)}"
                     )
         else:
-            self.model = self._load_default_model(default_function_name)
+            self.model = self._load_default_model_func(default_function_name)
             self._models_by_chunk_size[self.chunk_size] = self.model
             if self.unload_inactive_functions and self.idle_prefill_chunk_size is not None:
                 if self.idle_prefill_chunk_size not in self._function_names_by_chunk_size:
@@ -457,7 +423,7 @@ class CoreMLMiniCPMLM:
             x_desc = next((i for i in input_schema if i.get("name") == "inputs_embeds"), None)
             if x_desc is None:
                 continue
-            shape = _parse_shape_text(x_desc["shape"])
+            shape = parse_shape_text(x_desc["shape"])
             if (
                 len(shape) != 4
                 or shape[0] != self.batch_size
@@ -473,7 +439,7 @@ class CoreMLMiniCPMLM:
                 None,
             )
             seed_shape = (
-                _parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
+                parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
             )
             if seed_shape is not None and seed_shape != (chunk_size,):
                 raise ValueError(
@@ -493,10 +459,10 @@ class CoreMLMiniCPMLM:
             return model
         return self._model_for_chunk_size(self.chunk_size)
 
-    def _load_default_model(self, default_function_name: str) -> Any:
+    def _load_default_model_func(self, default_function_name: str) -> Any:
         t0 = time.perf_counter()
         try:
-            return _load_coreml_model(
+            return load_coreml_model(
                 self.model_path,
                 compute_units=self.compute_units,
                 function_name=default_function_name,
@@ -521,7 +487,7 @@ class CoreMLMiniCPMLM:
         event_name = f"{profile_prefix}/load_function_s{chunk_size}"
         t0 = time.perf_counter()
         with self._profile(profiler, event_name):
-            model = _load_coreml_model(
+            model = load_coreml_model(
                 self.model_path,
                 compute_units=self.compute_units,
                 function_name=name,
@@ -577,18 +543,12 @@ class CoreMLMiniCPMLM:
         *,
         preferred_chunk_size: Optional[int] = None,
     ) -> int:
-        if preferred_chunk_size is not None:
-            preferred = int(preferred_chunk_size)
-            if preferred not in self._function_names_by_chunk_size:
-                raise ValueError(
-                    f"preferred chunk size {preferred} is not available; "
-                    f"available sizes are {sorted(self._function_names_by_chunk_size)}"
-                )
-            return preferred
-        for chunk_size in sorted(self._function_names_by_chunk_size, reverse=True):
-            if chunk_size <= remaining:
-                return chunk_size
-        return self.chunk_size
+        return select_chunk_size(
+            remaining,
+            self._function_names_by_chunk_size,
+            self.chunk_size,
+            preferred_chunk_size=preferred_chunk_size,
+        )
 
     @staticmethod
     @contextmanager
@@ -843,18 +803,12 @@ class CoreMLMiniCPMLMChain:
         *,
         preferred_chunk_size: Optional[int] = None,
     ) -> int:
-        if preferred_chunk_size is not None:
-            preferred = int(preferred_chunk_size)
-            if preferred not in self._function_names_by_chunk_size:
-                raise ValueError(
-                    f"preferred chunk size {preferred} is not available; "
-                    f"available sizes are {sorted(self._function_names_by_chunk_size)}"
-                )
-            return preferred
-        for chunk_size in sorted(self._function_names_by_chunk_size, reverse=True):
-            if chunk_size <= remaining:
-                return chunk_size
-        return self.chunk_size
+        return select_chunk_size(
+            remaining,
+            self._function_names_by_chunk_size,
+            self.chunk_size,
+            preferred_chunk_size=preferred_chunk_size,
+        )
 
     def drain_lifecycle_events(self) -> list[tuple[str, float]]:
         events: list[tuple[str, float]] = []

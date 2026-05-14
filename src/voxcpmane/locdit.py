@@ -12,14 +12,18 @@ see :mod:`qeml.voxcpm2.locdit_torch`.
 
 from __future__ import annotations
 
-import json
 import math
 import time as _time
-from pathlib import Path
 
 import coremltools as ct
 import numpy as np
 from coremltools.proto import FeatureTypes_pb2
+
+from ._coreml_utils import (
+    load_compiled_metadata_entry,
+    load_coreml_model,
+    is_compiled_model_path,
+)
 
 
 def _sinusoidal_pos_emb_np(t: np.ndarray, dim: int, scale: float = 1000.0) -> np.ndarray:
@@ -57,23 +61,17 @@ class CoreMLUnifiedCFM:
         mean_mode: bool = False,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
     ):
-        model_path = Path(mlmodel_path)
-        if model_path.suffix == ".mlmodelc":
-            self.mlmodel = ct.models.CompiledMLModel(
-                str(model_path),
-                compute_units=compute_units,
+        if is_compiled_model_path(mlmodel_path):
+            self.mlmodel = load_coreml_model(
+                mlmodel_path, compute_units=compute_units
             )
-            metadata_path = model_path / "metadata.json"
-            if not metadata_path.exists():
-                raise FileNotFoundError(f"missing compiled metadata file: {metadata_path}")
-            metadata_raw = json.loads(metadata_path.read_text())
-            if not isinstance(metadata_raw, list) or not metadata_raw:
-                raise ValueError(f"unexpected metadata format in {metadata_path}")
-            self._metadata = metadata_raw[0]
+            self._metadata = load_compiled_metadata_entry(mlmodel_path)
         else:
-            self.mlmodel = ct.models.MLModel(str(model_path), compute_units=compute_units)
+            self.mlmodel = load_coreml_model(
+                mlmodel_path, compute_units=compute_units
+            )
             self._metadata = None
-            self._spec = ct.models.MLModel(str(model_path), skip_model_load=True).get_spec()
+            self._spec = ct.models.MLModel(str(mlmodel_path), skip_model_load=True).get_spec()
         self.in_channels = int(in_channels)
         self.sigma_min = float(sigma_min)
         self.t_scheduler = str(t_scheduler)

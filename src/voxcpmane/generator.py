@@ -20,6 +20,7 @@ from safetensors import safe_open
 
 log = logging.getLogger("voxcpmane.generator")
 
+from ._coreml_utils import load_coreml_model
 from .audio_vae_decoder import AudioVAEDecoder
 from .audio_vae_encoder import AudioVAEEncoder
 from .feat_encoder import FeatEncoder
@@ -49,12 +50,6 @@ def _compiled_sibling_if_available(path: Path, *, use_compiled: bool = True) -> 
 
 def _compiled_counterpart_in_dir(path: Path, compiled_dir: Path) -> Path:
     return compiled_dir / path.with_suffix(".mlmodelc").name
-
-
-def _load_coreml_model(path: Path, *, compute_units: ct.ComputeUnit):
-    if path.suffix == ".mlmodelc":
-        return ct.models.CompiledMLModel(str(path), compute_units=compute_units)
-    return ct.models.MLModel(str(path), compute_units=compute_units)
 
 
 def _iter_safetensors_files(path: str | os.PathLike[str]) -> Iterable[Path]:
@@ -257,6 +252,9 @@ class VoxCPM2Generator:
         self.embed_tokens = embed_tokens.astype(np.float32)
         self.scale_emb = scale_emb
         self.audio_start_token = audio_start_token
+        self.audio_end_token = audio_end_token
+        self.ref_audio_start_token = ref_audio_start_token
+        self.ref_audio_end_token = ref_audio_end_token
         self.hidden_size = hidden_size
         self.dit_hidden_dim = dit_hidden_dim
         self.patch_size = patch_size
@@ -411,11 +409,11 @@ class VoxCPM2Generator:
         )
         fsq_path = _resolve_model_path(fsq_src, use_compiled=True)
         projections_path = _resolve_model_path(projections_src, use_compiled=True)
-        self.fsq_model = _load_coreml_model(
+        self.fsq_model = load_coreml_model(
             fsq_path,
             compute_units=fsq_compute_units,
         )
-        self.projections_model = _load_coreml_model(
+        self.projections_model = load_coreml_model(
             projections_path,
             compute_units=proj_compute_units,
         )
@@ -562,6 +560,9 @@ class VoxCPM2Generator:
         ``vae_decoder_reset`` flag.
         """
         t_prefill = time.perf_counter()
+        prompt_text = prompt_text or ""
+        prompt_wav_path = (prompt_wav_path or "").strip()
+        reference_wav_path = (reference_wav_path or "").strip()
         if self.debug:
             log.debug("_prefill: start — target_text=%r, prompt_text=%r, "
                       "prompt_wav=%r, ref_wav=%r",
@@ -831,6 +832,76 @@ class VoxCPM2Generator:
                 log.debug("_swap_to_decode: %s done", name)
 
     # ------------------------------------------------------------------ #
+    # unified AR loop
+    # ------------------------------------------------------------------ #
+
+    def _ar_loop(
+        self,
+        state: dict,
+        *,
+        max_len: int,
+        min_len: int,
+        inference_timesteps: int,
+        cfg_value: float,
+        rng: np.random.Generator,
+    ) -> Generator[np.ndarray, None, None]:
+        """Core autoregressive loop — yields ``pred_feat`` per step.
+
+        Both :meth:`generate` and :meth:`generate_streaming` delegate to
+        this generator, choosing only *when* to VAE-decode the yielded
+        features (batch-after vs per-step).
+        """
+        lm_hidden = state["lm_hidden"]
+        residual_hidden = state["residual_hidden"]
+        prefix_feat_cond = state["prefix_feat_cond"]
+
+        for i in range(max_len):
+            if self.debug:
+                log.debug("ar[%d]: step start", i)
+                t_step = time.perf_counter()
+
+            dit_hidden, stop_flag = self._projections(lm_hidden, residual_hidden)
+            if self.debug:
+                log.debug("ar[%d]: projections done, dit_hidden shape=%s, stop_flag=%s",
+                          i, dit_hidden.shape, stop_flag.reshape(-1).tolist())
+
+            pred_feat = self.locdit.predict_numpy(
+                mu=dit_hidden.reshape(1, -1),
+                n_timesteps=inference_timesteps,
+                patch_size=self.patch_size,
+                cond=prefix_feat_cond,
+                cfg_value=cfg_value,
+                rng=rng,
+            )
+            if self.debug:
+                log.debug("ar[%d]: locdit done, pred_feat shape=%s range=[%.4f, %.4f]",
+                          i, pred_feat.shape, float(pred_feat.min()), float(pred_feat.max()))
+
+            yield pred_feat
+
+            # Advance LM state for next step
+            pf = pred_feat.transpose(0, 2, 1)
+            pf = pf.reshape(1, 1, self.patch_size, self.latent_dim)
+            curr_embed = self.feat_encoder.encode_patches(pf)
+            curr_embed_nchw = curr_embed.transpose(0, 2, 1)[:, :, None, :]
+            prefix_feat_cond = pred_feat
+
+            stop = int(np.argmax(stop_flag.reshape(-1)))
+            if i > min_len and stop == 1:
+                if self.debug:
+                    log.debug("ar[%d]: stop token detected, breaking", i)
+                break
+
+            lm_hidden = self.base_lm.forward_step(curr_embed_nchw, None)
+            lm_hidden = self._fsq(lm_hidden)
+
+            residual_input = np.concatenate([lm_hidden, curr_embed_nchw], axis=1)
+            residual_hidden = self.residual_lm.forward_step(residual_input, None)
+            if self.debug:
+                log.debug("ar[%d]: step done in %.3fs",
+                          i, time.perf_counter() - t_step)
+
+    # ------------------------------------------------------------------ #
     # main generation
     # ------------------------------------------------------------------ #
 
@@ -863,58 +934,18 @@ class VoxCPM2Generator:
             reference_audio_feat=reference_audio_feat,
         )
         self._swap_to_decode()
-        lm_hidden = state["lm_hidden"]
-        residual_hidden = state["residual_hidden"]
-        prefix_feat_cond = state["prefix_feat_cond"]
 
-        # Autoregressive loop
         pred_feat_seq = []
-
         try:
-            for i in range(max_len):
-                if self.debug:
-                    log.debug("generate: AR step %d/%d", i, max_len)
-                    t_step = time.perf_counter()
-
-                dit_hidden, stop_flag = self._projections(lm_hidden, residual_hidden)
-                if self.debug:
-                    log.debug("generate[%d]: projections done, dit_hidden shape=%s, stop_flag=%s",
-                              i, dit_hidden.shape, stop_flag.reshape(-1).tolist())
-
-                pred_feat = self.locdit.predict_numpy(
-                    mu=dit_hidden.reshape(1, -1),
-                    n_timesteps=inference_timesteps,
-                    patch_size=self.patch_size,
-                    cond=prefix_feat_cond,
-                    cfg_value=cfg_value,
-                    rng=rng,
-                )
-                if self.debug:
-                    log.debug("generate[%d]: locdit done, pred_feat shape=%s range=[%.4f, %.4f]",
-                              i, pred_feat.shape, float(pred_feat.min()), float(pred_feat.max()))
-
-                pf = pred_feat.transpose(0, 2, 1)
-                pf = pf.reshape(1, 1, self.patch_size, self.latent_dim)
-                curr_embed = self.feat_encoder.encode_patches(pf)
-                curr_embed_nchw = curr_embed.transpose(0, 2, 1)[:, :, None, :]
-
+            for pred_feat in self._ar_loop(
+                state,
+                max_len=max_len,
+                min_len=min_len,
+                inference_timesteps=inference_timesteps,
+                cfg_value=cfg_value,
+                rng=rng,
+            ):
                 pred_feat_seq.append(pred_feat)
-                prefix_feat_cond = pred_feat
-
-                stop = int(np.argmax(stop_flag.reshape(-1)))
-                if i > min_len and stop == 1:
-                    if self.debug:
-                        log.debug("generate[%d]: stop token detected, breaking", i)
-                    break
-
-                lm_hidden = self.base_lm.forward_step(curr_embed_nchw, None)
-                lm_hidden = self._fsq(lm_hidden)
-
-                residual_input = np.concatenate([lm_hidden, curr_embed_nchw], axis=1)
-                residual_hidden = self.residual_lm.forward_step(residual_input, None)
-                if self.debug:
-                    log.debug("generate[%d]: step done in %.3fs",
-                              i, time.perf_counter() - t_step)
         finally:
             if self.debug:
                 log.debug("generate: AR loop done, %d patches, swapping to idle", len(pred_feat_seq))
@@ -976,85 +1007,40 @@ class VoxCPM2Generator:
             reference_audio_feat=reference_audio_feat,
         )
         self._swap_to_decode()
-        lm_hidden = state["lm_hidden"]
-        residual_hidden = state["residual_hidden"]
-        prefix_feat_cond = state["prefix_feat_cond"]
 
         self.vae_decoder.reset()
         if self.debug:
             log.debug("generate_streaming: vae_decoder reset, starting AR loop")
 
         try:
-            for i in range(max_len):
-                if self.debug:
-                    log.debug("stream[%d]: AR step start", i)
-                    t_step = time.perf_counter()
-
-                dit_hidden, stop_flag = self._projections(lm_hidden, residual_hidden)
-                if self.debug:
-                    log.debug("stream[%d]: projections done, dit_hidden shape=%s, "
-                              "stop_flag=%s",
-                              i, dit_hidden.shape, stop_flag.reshape(-1).tolist())
-
-                pred_feat = self.locdit.predict_numpy(
-                    mu=dit_hidden.reshape(1, -1),
-                    n_timesteps=inference_timesteps,
-                    patch_size=self.patch_size,
-                    cond=prefix_feat_cond,
-                    cfg_value=cfg_value,
-                    rng=rng,
-                )
-                if self.debug:
-                    log.debug("stream[%d]: locdit done, pred_feat shape=%s range=[%.4f, %.4f]",
-                              i, pred_feat.shape, float(pred_feat.min()), float(pred_feat.max()))
-
-                # VAE decode this patch immediately
+            for pred_feat in self._ar_loop(
+                state,
+                max_len=max_len,
+                min_len=min_len,
+                inference_timesteps=inference_timesteps,
+                cfg_value=cfg_value,
+                rng=rng,
+            ):
                 if self.debug:
                     has_nan = bool(np.isnan(pred_feat).any())
                     has_inf = bool(np.isinf(pred_feat).any())
-                    log.debug("stream[%d]: vae_decoder.decode_chunk "
+                    log.debug("stream: vae_decoder.decode_chunk "
                               "pred_feat=%s nan=%s inf=%s range=[%.4f, %.4f]",
-                              i, pred_feat.shape, has_nan, has_inf,
+                              pred_feat.shape, has_nan, has_inf,
                               float(pred_feat.min()), float(pred_feat.max()))
                     if hasattr(self.vae_decoder, '_caches'):
                         for ci, c in enumerate(self.vae_decoder._caches):
-                            log.debug("stream[%d]: vae cache_%d shape=%s "
+                            log.debug("stream: vae cache_%d shape=%s "
                                       "range=[%.4f, %.4f] nan=%s",
-                                      i, ci, c.shape, float(c.min()),
+                                      ci, c.shape, float(c.min()),
                                       float(c.max()), bool(np.isnan(c).any()))
                     sys.stdout.flush(); sys.stderr.flush()
                 audio_chunk = self.vae_decoder.decode_chunk(pred_feat).reshape(-1)
                 if self.debug:
-                    log.debug("stream[%d]: audio_chunk len=%d range=[%.4f, %.4f]",
-                              i, len(audio_chunk),
+                    log.debug("stream: audio_chunk len=%d range=[%.4f, %.4f]",
+                              len(audio_chunk),
                               float(audio_chunk.min()), float(audio_chunk.max()))
                 yield audio_chunk
-
-                pf = pred_feat.transpose(0, 2, 1)
-                pf = pf.reshape(1, 1, self.patch_size, self.latent_dim)
-                curr_embed = self.feat_encoder.encode_patches(pf)
-                curr_embed_nchw = curr_embed.transpose(0, 2, 1)[:, :, None, :]
-
-                prefix_feat_cond = pred_feat
-
-                stop = int(np.argmax(stop_flag.reshape(-1)))
-                if i > min_len and stop == 1:
-                    if self.debug:
-                        log.debug("stream[%d]: stop token detected, breaking", i)
-                    break
-
-                if self.debug:
-                    log.debug("stream[%d]: base_lm.forward_step...", i)
-                lm_hidden = self.base_lm.forward_step(curr_embed_nchw, None)
-                lm_hidden = self._fsq(lm_hidden)
-
-                if self.debug:
-                    log.debug("stream[%d]: residual_lm.forward_step...", i)
-                residual_input = np.concatenate([lm_hidden, curr_embed_nchw], axis=1)
-                residual_hidden = self.residual_lm.forward_step(residual_input, None)
-                if self.debug:
-                    log.debug("stream[%d]: step done in %.3fs",
-                              i, time.perf_counter() - t_step)
         except GeneratorExit:
             if self.debug:
                 log.debug("generate_streaming: GeneratorExit caught")

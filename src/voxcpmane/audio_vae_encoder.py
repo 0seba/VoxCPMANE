@@ -11,40 +11,26 @@ cache is carried forward; :meth:`AudioVAEEncoder.reset` re-zeros it.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Tuple
 
 import coremltools as ct
 import numpy as np
 
+from ._coreml_utils import (
+    PathLike,
+    discover_cache_shapes_from_schema,
+    discover_cache_shapes_from_spec_model,
+    load_compiled_metadata_entry,
+    load_coreml_model,
+)
 from .audio_io import load_audio
-
-PathLike = Union[str, Path]
 
 # Defaults matching AudioVAEConfig in upstream VoxCPM 2.
 DEFAULT_HOP_LENGTH = 640  # math.prod([2, 5, 8, 8])
 DEFAULT_LATENT_DIM = 64
 DEFAULT_PATCH_SIZE = 4
 DEFAULT_SAMPLE_RATE = 16000
-
-
-def _load_coreml_model(path: PathLike, compute_units: ct.ComputeUnit):
-    model_path = Path(path)
-    if model_path.suffix == ".mlmodelc":
-        return ct.models.CompiledMLModel(str(model_path), compute_units=compute_units)
-    return ct.models.MLModel(str(model_path), compute_units=compute_units)
-
-
-def _load_compiled_metadata_entry(path: PathLike) -> dict:
-    model_path = Path(path)
-    metadata_path = model_path / "metadata.json"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"missing compiled metadata file: {metadata_path}")
-    raw = json.loads(metadata_path.read_text())
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"unexpected metadata format in {metadata_path}")
-    return raw[0]
 
 
 class AudioVAEEncoder:
@@ -70,7 +56,7 @@ class AudioVAEEncoder:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_ONLY,
     ):
-        self.model = _load_coreml_model(model_path, compute_units)
+        self.model = load_coreml_model(model_path, compute_units=compute_units)
         self.chunk_samples = int(chunk_samples)
         self.hop_length = int(hop_length)
         self.latent_dim = int(latent_dim)
@@ -86,12 +72,12 @@ class AudioVAEEncoder:
         self.frames_per_chunk = self.chunk_samples // self.hop_length
 
         if Path(model_path).suffix == ".mlmodelc":
-            metadata = _load_compiled_metadata_entry(model_path)
-            self._cache_shapes = _discover_cache_shapes_from_schema(
+            metadata = load_compiled_metadata_entry(model_path)
+            self._cache_shapes = discover_cache_shapes_from_schema(
                 metadata.get("inputSchema", [])
             )
         else:
-            self._cache_shapes = _discover_cache_shapes_from_spec_model(self.model)
+            self._cache_shapes = discover_cache_shapes_from_spec_model(self.model)
         self._caches: List[np.ndarray] = []
         self.reset()
 
@@ -206,30 +192,3 @@ class AudioVAEEncoder:
         if remainder == 0:
             return audio
         return np.pad(audio, (0, self.chunk_samples - remainder))
-
-
-def _discover_cache_shapes_from_spec_model(model: ct.models.MLModel) -> List[Tuple[int, ...]]:
-    """Read ``cache_0``, ``cache_1``, ... input shapes from the model spec."""
-    spec_inputs = model.get_spec().description.input
-    named: List[Tuple[int, Tuple[int, ...]]] = []
-    for inp in spec_inputs:
-        if not inp.name.startswith("cache_"):
-            continue
-        idx = int(inp.name[len("cache_"):])
-        shape = tuple(int(d) for d in inp.type.multiArrayType.shape)
-        named.append((idx, shape))
-    named.sort(key=lambda kv: kv[0])
-    return [shape for _, shape in named]
-
-
-def _discover_cache_shapes_from_schema(input_schema: list[dict]) -> List[Tuple[int, ...]]:
-    named: List[Tuple[int, Tuple[int, ...]]] = []
-    for inp in input_schema:
-        name = inp.get("name", "")
-        if not name.startswith("cache_"):
-            continue
-        idx = int(name[len("cache_"):])
-        shape = tuple(int(d) for d in inp["shape"].strip("[]").split(",") if d.strip())
-        named.append((idx, shape))
-    named.sort(key=lambda kv: kv[0])
-    return [shape for _, shape in named]

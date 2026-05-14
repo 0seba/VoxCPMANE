@@ -56,22 +56,35 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                         </a>
                     </label>
                     <select id="voice-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
-                        <option value="">Use Prompt Audio</option>
+                        <option value="">Manual prompt / zero-shot</option>
                     </select>
                     <div id="voice-status" class="mt-2 text-sm text-gray-400"></div>
                 </div>
 
-                <div id="prompt-section">
-                    <label for="prompt-wav-path" class="flex items-center text-sm font-medium text-gray-300 mb-2">
-                        <span>Prompt WAV Path (Optional for Voice Cloning)</span>
+                <div id="reference-section">
+                    <label for="reference-wav-path" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                        <span>Reference WAV Path (Optional)</span>
                         <div class="relative group ml-2">
                             <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
                             <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
-                                Random sounding voice if unspecified.
+                                Encoded as an isolated voice reference with reference-audio boundary tokens.
                             </div>
                         </div>
                     </label>
-                    <input type="text" id="prompt-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                    <input type="text" id="reference-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="/path/to/reference.wav">
+                </div>
+
+                <div id="prompt-section">
+                    <label for="prompt-wav-path" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                        <span>Prompt WAV Path (Optional Continuation)</span>
+                        <div class="relative group ml-2">
+                            <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
+                            <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
+                                Appended after the text span as continuation audio. Pair it with the matching prompt text.
+                            </div>
+                        </div>
+                    </label>
+                    <input type="text" id="prompt-wav-path" value="" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="/path/to/prompt.wav">
                 </div>
 
                 <div id="prompt-text-section">
@@ -202,6 +215,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const textInput = document.getElementById('text-input');
         const promptTextInput = document.getElementById('prompt-text');
         const promptWavPathInput = document.getElementById('prompt-wav-path');
+        const referenceWavPathInput = document.getElementById('reference-wav-path');
         
         // --- Voice Selection Elements ---
         const voiceSelect = document.getElementById('voice-select');
@@ -245,6 +259,18 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         let nextStartTime = 0; // Time at which the next audio chunk should start playing
         let isPlaying = false;
         let sampleRate = 16000; // Default, will try to get from header
+        let streamQueue = [];
+        let queuedAudioDuration = 0;
+        let streamEnded = false;
+        let playbackStarted = false;
+        let schedulerTimer = null;
+        let pendingPcmBytes = new Uint8Array(0);
+
+        const INITIAL_STREAM_BUFFER_SECONDS = 0.6;
+        const TARGET_SCHEDULE_AHEAD_SECONDS = 1.2;
+        const RESTART_DELAY_SECONDS = 0.08;
+        const UNDERRUN_GRACE_SECONDS = 0.015;
+        const FADE_SECONDS = 0.005;
         
         // --- Array to store audio chunks for final playback ---
         let audioChunks = [];
@@ -277,7 +303,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 const data = await response.json();
                 
                 // Clear existing options except the first one
-                voiceSelect.innerHTML = '<option value="">Use Prompt Audio</option>';
+                voiceSelect.innerHTML = '<option value="">Manual prompt / zero-shot</option>';
                 
                 // Add voice options
                 data.voices.forEach(voice => {
@@ -308,7 +334,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             } else {
                 promptSection.style.display = 'block';
                 promptTextSection.style.display = 'block';
-                voiceStatus.textContent = 'Using prompt audio';
+                voiceStatus.textContent = 'Using manual prompt/reference fields';
                 voiceStatus.className = 'mt-2 text-sm text-gray-400';
             }
         });
@@ -354,6 +380,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 generateFullButtonText.textContent = 'Generate Full Audio';
                 
                 streamReader = null;
+                clearSchedulerTimer();
             }
         }
         
@@ -366,6 +393,147 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 generateFullButtonText.textContent = 'Generating...';
             } else {
                 setPlayingState(false);
+            }
+        }
+
+        function buildSpeechRequestBody(responseFormat) {
+            const requestBody = {
+                input: textInput.value,
+                response_format: responseFormat,
+                max_length: parseInt(maxLengthInput.value),
+                cfg_value: parseFloat(cfgValueInput.value),
+                inference_timesteps: parseInt(inferenceTimestepsInput.value)
+            };
+
+            const referenceWavPath = referenceWavPathInput.value.trim();
+            if (referenceWavPath) {
+                requestBody.reference_wav_path = referenceWavPath;
+            }
+
+            const selectedVoice = voiceSelect.value;
+            if (selectedVoice) {
+                requestBody.voice = selectedVoice;
+            } else {
+                const promptWavPath = promptWavPathInput.value.trim();
+                const promptText = promptTextInput.value.trim();
+                if (promptWavPath) {
+                    requestBody.prompt_wav_path = promptWavPath;
+                    requestBody.prompt_text = promptText;
+                }
+            }
+
+            return requestBody;
+        }
+
+        function clearSchedulerTimer() {
+            if (schedulerTimer !== null) {
+                clearTimeout(schedulerTimer);
+                schedulerTimer = null;
+            }
+        }
+
+        function resetStreamPlaybackState() {
+            clearSchedulerTimer();
+            streamQueue = [];
+            queuedAudioDuration = 0;
+            streamEnded = false;
+            playbackStarted = false;
+            pendingPcmBytes = new Uint8Array(0);
+            nextStartTime = 0;
+        }
+
+        function enqueueStreamChunk(pcm32Data) {
+            streamQueue.push(pcm32Data);
+            queuedAudioDuration += pcm32Data.length / sampleRate;
+            scheduleBufferedAudio();
+        }
+
+        function pcmBytesToFloat32(value) {
+            let bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+
+            if (pendingPcmBytes.length > 0) {
+                const merged = new Uint8Array(pendingPcmBytes.length + bytes.length);
+                merged.set(pendingPcmBytes, 0);
+                merged.set(bytes, pendingPcmBytes.length);
+                bytes = merged;
+                pendingPcmBytes = new Uint8Array(0);
+            }
+
+            const alignedByteLength = bytes.length - (bytes.length % 2);
+            if (alignedByteLength < bytes.length) {
+                pendingPcmBytes = bytes.slice(alignedByteLength);
+            }
+            if (alignedByteLength === 0) {
+                return null;
+            }
+
+            const sampleBytes = bytes.slice(0, alignedByteLength);
+            const pcm16Data = new Int16Array(sampleBytes.buffer);
+            const pcm32Data = new Float32Array(pcm16Data.length);
+            for (let i = 0; i < pcm16Data.length; i++) {
+                pcm32Data[i] = pcm16Data[i] / 32768.0;
+            }
+            return pcm32Data;
+        }
+
+        function copyForPlayback(samples, fadeIn) {
+            const out = new Float32Array(samples);
+            if (!fadeIn) {
+                return out;
+            }
+            const fadeSamples = Math.min(
+                out.length,
+                Math.max(1, Math.floor(sampleRate * FADE_SECONDS))
+            );
+            for (let i = 0; i < fadeSamples; i++) {
+                out[i] *= i / fadeSamples;
+            }
+            return out;
+        }
+
+        function scheduleBufferedAudio() {
+            clearSchedulerTimer();
+            if (!audioContext || audioContext.state === 'closed' || !isPlaying) {
+                return;
+            }
+
+            if (!playbackStarted) {
+                if (!streamEnded && queuedAudioDuration < INITIAL_STREAM_BUFFER_SECONDS) {
+                    playButtonText.textContent = 'Buffering...';
+                    return;
+                }
+                playbackStarted = true;
+                nextStartTime = audioContext.currentTime + RESTART_DELAY_SECONDS;
+                playButtonText.textContent = 'Playing...';
+            }
+
+            let fadeInNextChunk = false;
+            const minimumStartTime = audioContext.currentTime + UNDERRUN_GRACE_SECONDS;
+            if (nextStartTime < minimumStartTime) {
+                nextStartTime = audioContext.currentTime + RESTART_DELAY_SECONDS;
+                fadeInNextChunk = true;
+            }
+
+            while (
+                streamQueue.length > 0 &&
+                (streamEnded || nextStartTime - audioContext.currentTime < TARGET_SCHEDULE_AHEAD_SECONDS)
+            ) {
+                const samples = streamQueue.shift();
+                queuedAudioDuration = Math.max(0, queuedAudioDuration - samples.length / sampleRate);
+
+                const audioBuffer = audioContext.createBuffer(1, samples.length, sampleRate);
+                audioBuffer.getChannelData(0).set(copyForPlayback(samples, fadeInNextChunk));
+                fadeInNextChunk = false;
+
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(nextStartTime);
+                nextStartTime += audioBuffer.duration;
+            }
+
+            if (!streamEnded || streamQueue.length > 0) {
+                schedulerTimer = setTimeout(scheduleBufferedAudio, 50);
             }
         }
 
@@ -449,6 +617,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
             audioPlayer.src = '';
             audioChunks = [];
+            resetStreamPlaybackState();
             
             const text = textInput.value;
             if (!text.trim()) {
@@ -461,7 +630,6 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
 
             try {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                nextStartTime = audioContext.currentTime + 0.1;
                 console.log('AudioContext started, state:', audioContext.state);
             } catch (e) {
                 console.error('Error creating AudioContext:', e);
@@ -471,21 +639,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
 
             try {
-                const requestBody = {
-                    input: text,
-                    response_format: 'pcm',
-                    max_length: parseInt(maxLengthInput.value),
-                    cfg_value: parseFloat(cfgValueInput.value),
-                    inference_timesteps: parseInt(inferenceTimestepsInput.value)
-                };
-
-                const selectedVoice = voiceSelect.value;
-                if (selectedVoice) {
-                    requestBody.voice = selectedVoice;
-                } else {
-                    requestBody.prompt_wav_path = promptWavPathInput.value;
-                    requestBody.prompt_text = promptTextInput.value;
-                }
+                const requestBody = buildSpeechRequestBody('pcm');
 
                 const response = await fetch('/v1/audio/speech/stream', {
                     method: 'POST',
@@ -550,21 +704,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             setFullGeneratingState(true);
 
             try {
-                const requestBody = {
-                    input: text,
-                    response_format: 'wav',
-                    max_length: parseInt(maxLengthInput.value),
-                    cfg_value: parseFloat(cfgValueInput.value),
-                    inference_timesteps: parseInt(inferenceTimestepsInput.value)
-                };
-
-                const selectedVoice = voiceSelect.value;
-                if (selectedVoice) {
-                    requestBody.voice = selectedVoice;
-                } else {
-                    requestBody.prompt_wav_path = promptWavPathInput.value;
-                    requestBody.prompt_text = promptTextInput.value;
-                }
+                const requestBody = buildSpeechRequestBody('wav');
 
                 const response = await fetch('/v1/audio/speech', {
                     method: 'POST',
@@ -617,6 +757,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             if (streamReader) {
                 streamReader.cancel('User stopped playback.').catch(() => {});
             }
+            resetStreamPlaybackState();
             
             try {
                 const response = await fetch('/v1/audio/speech/cancel', {
@@ -655,9 +796,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 const { done, value } = await streamReader.read();
 
                 if (done) {
+                    streamEnded = true;
                     console.log('Stream download finished. Waiting for playback to complete.');
                     
                     if (audioContext && audioContext.state !== 'closed' && isPlaying) {
+                        scheduleBufferedAudio();
                         buildFinalAudio(); 
 
                         const remainingTimeInSeconds = nextStartTime - audioContext.currentTime;
@@ -685,47 +828,12 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     return;
                 }
 
-                const chunkByteLength = value.byteLength;
-                const alignedByteLength = chunkByteLength - (chunkByteLength % 2);
-                
-                if (alignedByteLength === 0) {
-                    processStream();
-                    return;
+                const pcm32Data = pcmBytesToFloat32(value);
+
+                if (pcm32Data) {
+                    audioChunks.push(pcm32Data);
+                    enqueueStreamChunk(pcm32Data);
                 }
-                
-                const pcm16Data = new Int16Array(
-                    value.buffer,
-                    value.byteOffset,
-                    alignedByteLength / 2
-                );
-
-                const numSamples = pcm16Data.length;
-                const pcm32Data = new Float32Array(numSamples);
-                for (let i = 0; i < numSamples; i++) {
-                    pcm32Data[i] = pcm16Data[i] / 32768.0;
-                }
-                
-                audioChunks.push(pcm32Data);
-
-                if (!audioContext || audioContext.state === 'closed') {
-                    console.log('AudioContext is closed, stopping stream processing.');
-                    return;
-                }
-                const audioBuffer = audioContext.createBuffer(
-                    1,
-                    numSamples,
-                    sampleRate
-                );
-                audioBuffer.getChannelData(0).set(pcm32Data);
-
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-
-                const playTime = Math.max(nextStartTime, audioContext.currentTime);
-                source.start(playTime);
-
-                nextStartTime = playTime + audioBuffer.duration;
 
                 processStream();
 

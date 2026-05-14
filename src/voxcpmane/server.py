@@ -470,7 +470,7 @@ def normalize_apple_punctuation(text):
 
 
 # ---------------------------------------------------------------------------
-# Generation core — three-mode dispatch matching upstream VoxCPM2 app.py
+# Generation core — VoxCPM2 conditioning dispatch
 # ---------------------------------------------------------------------------
 
 def generate_audio_chunks(
@@ -511,55 +511,62 @@ def generate_audio_chunks(
     control = re.sub(r"[()（）]", "", control).strip()
     final_text = f"({control}){text}" if control else text
 
-    # Voice cache mode
+    reference_path = (reference_wav_path or "").strip() or None
+    prompt_path = (prompt_wav_path or "").strip() or None
+    prompt_text_clean = (prompt_text or "").strip()
+
+    # Voice cache mode. Cached voices are continuation prompts and can be
+    # combined with a separate reference_wav_path, matching upstream's
+    # reference+continuation packing.
     prompt_audio_feat = None
-    if voice is not None:
-        audio_cache = load_voice_cache(voice)
-        voice_prompt_text = get_voice_prompt_text(voice)
+    voice_name = (voice or "").strip() or None
+    if voice_name is not None:
+        if prompt_path is not None:
+            raise ValueError("voice and prompt_wav_path are both continuation prompts; use only one")
+        audio_cache = load_voice_cache(voice_name)
+        voice_prompt_text = get_voice_prompt_text(voice_name)
         # Cached voices are continuation prompts: feed both the prompt
         # transcript and the pre-encoded prompt audio features. Prepending
         # the transcript without audio conditioning breaks the trained
         # text/audio mask contract and produces poor generations.
-        prompt_text = voice_prompt_text
+        prompt_text_clean = voice_prompt_text.strip()
         prompt_audio_feat = audio_cache.astype(np.float32, copy=False)
 
-    # Three-mode dispatch (upstream _build_generate_kwargs), extended to
-    # honor explicit prompt_wav_path from API callers/frontends.
-    audio_path = (reference_wav_path or "").strip() or None
-    explicit_prompt_wav_path = (prompt_wav_path or "").strip() or None
-    prompt_text_clean = (prompt_text or "").strip() or None
+    for label, path in (
+        ("reference_wav_path", reference_path),
+        ("prompt_wav_path", prompt_path),
+    ):
+        if path is not None and not os.path.exists(path):
+            raise FileNotFoundError(f"{label} does not exist: {path}")
+
     target_text_length = len(generator._encode_text(final_text))
     effective_max_length = min(int(target_text_length * 6.0 + 10), int(max_length))
 
     gen_kwargs = dict(
         target_text=final_text,
-        reference_wav_path=audio_path or "",
         cfg_value=cfg_value,
         inference_timesteps=inference_timesteps,
         max_len=effective_max_length,
     )
-    if prompt_text_clean and audio_path:
-        # Ultimate Cloning: same audio as both reference and prompt
-        gen_kwargs["prompt_wav_path"] = audio_path
-        gen_kwargs["prompt_text"] = prompt_text_clean
-    elif prompt_text_clean and explicit_prompt_wav_path:
-        # Prompt-wav cloning: explicit prompt audio from request/frontend.
-        gen_kwargs["prompt_wav_path"] = explicit_prompt_wav_path
+    if reference_path is not None:
+        gen_kwargs["reference_wav_path"] = reference_path
+    if prompt_path is not None:
+        gen_kwargs["prompt_wav_path"] = prompt_path
         gen_kwargs["prompt_text"] = prompt_text_clean
     elif prompt_audio_feat is not None:
         gen_kwargs["prompt_audio_feat"] = prompt_audio_feat
-        gen_kwargs["prompt_text"] = prompt_text_clean or ""
+        gen_kwargs["prompt_text"] = prompt_text_clean
 
-    if prompt_text_clean and audio_path:
-        mode = "ultimate_cloning"
-    elif prompt_text_clean and explicit_prompt_wav_path:
-        mode = "prompt_wav_cloning"
-    elif prompt_audio_feat is not None:
-        mode = "controllable_cloning_cached_voice"
-    elif audio_path:
-        mode = "controllable_cloning_reference"
+    has_reference = reference_path is not None
+    has_prompt = prompt_path is not None or prompt_audio_feat is not None
+    if has_reference and has_prompt:
+        mode = "reference_plus_continuation"
+    elif has_reference:
+        mode = "reference_only"
+    elif has_prompt:
+        mode = "continuation"
     else:
-        mode = "voice_design"
+        mode = "zero_shot"
     print(f"🎤 generate_audio_chunks: mode={mode}, text={final_text[:80]!r}..., "
           f"max_len={effective_max_length}, cfg={cfg_value}, steps={inference_timesteps}",
           flush=True)

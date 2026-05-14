@@ -22,32 +22,17 @@ between calls.
 from __future__ import annotations
 
 import math
-import json
 from pathlib import Path
-from typing import Union
 
 import coremltools as ct
 import numpy as np
 
-PathLike = Union[str, Path]
-
-
-def _load_coreml_model(path: PathLike, compute_units: ct.ComputeUnit):
-    model_path = Path(path)
-    if model_path.suffix == ".mlmodelc":
-        return ct.models.CompiledMLModel(str(model_path), compute_units=compute_units)
-    return ct.models.MLModel(str(model_path), compute_units=compute_units)
-
-
-def _load_compiled_metadata_entry(path: PathLike) -> dict:
-    model_path = Path(path)
-    metadata_path = model_path / "metadata.json"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"missing compiled metadata file: {metadata_path}")
-    raw = json.loads(metadata_path.read_text())
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"unexpected metadata format in {metadata_path}")
-    return raw[0]
+from ._coreml_utils import (
+    PathLike,
+    load_compiled_metadata_entry,
+    load_coreml_model,
+    parse_shape_text,
+)
 
 
 class FeatEncoder:
@@ -73,12 +58,12 @@ class FeatEncoder:
         # CPU fp16 path — cosine similarity collapsed from 0.9999 to
         # 0.41 in testing. Scheduling the same graph on GPU or the
         # Neural Engine keeps it at 0.9999+.
-        self.model = _load_coreml_model(model_path, compute_units)
+        self.model = load_coreml_model(model_path, compute_units=compute_units)
         if Path(model_path).suffix == ".mlmodelc":
-            metadata = _load_compiled_metadata_entry(model_path)
+            metadata = load_compiled_metadata_entry(model_path)
             input_schema = metadata.get("inputSchema", [])
             patches_input = next(i for i in input_schema if i.get("name") == "patches")
-            shape = tuple(int(d) for d in patches_input["shape"].strip("[]").split(",") if d.strip())
+            shape = parse_shape_text(patches_input["shape"])
         else:
             spec_inputs = self.model.get_spec().description.input
             patches_input = next(i for i in spec_inputs if i.name == "patches")
