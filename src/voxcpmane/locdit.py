@@ -17,16 +17,18 @@ import time as _time
 
 import coremltools as ct
 import numpy as np
-from coremltools.proto import FeatureTypes_pb2
+
+from pathlib import Path
 
 from ._coreml_utils import (
-    load_compiled_metadata_entry,
+    get_feature_info,
     load_coreml_model,
-    is_compiled_model_path,
 )
 
 
-def _sinusoidal_pos_emb_np(t: np.ndarray, dim: int, scale: float = 1000.0) -> np.ndarray:
+def _sinusoidal_pos_emb_np(
+    t: np.ndarray, dim: int, scale: float = 1000.0
+) -> np.ndarray:
     """Numpy twin of ``voxcpm.modules.locdit.SinusoidalPosEmb`` — runs in
     fp32 on the caller side so the ``sin``/``cos`` stay out of the fp16
     CoreML graph (fp16 ``sin`` of values near 1000 loses precision)."""
@@ -53,7 +55,7 @@ class CoreMLUnifiedCFM:
 
     def __init__(
         self,
-        mlmodel_path: str,
+        mlmodel_path: Path,
         *,
         in_channels: int = 64,
         sigma_min: float = 1e-6,
@@ -61,52 +63,64 @@ class CoreMLUnifiedCFM:
         mean_mode: bool = False,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
     ):
-        if is_compiled_model_path(mlmodel_path):
-            self.mlmodel = load_coreml_model(
-                mlmodel_path, compute_units=compute_units
-            )
-            self._metadata = load_compiled_metadata_entry(mlmodel_path)
-        else:
-            self.mlmodel = load_coreml_model(
-                mlmodel_path, compute_units=compute_units
-            )
-            self._metadata = None
-            self._spec = ct.models.MLModel(str(mlmodel_path), skip_model_load=True).get_spec()
+        self.mlmodel = load_coreml_model(mlmodel_path, compute_units=compute_units)
         self.in_channels = int(in_channels)
         self.sigma_min = float(sigma_min)
         self.t_scheduler = str(t_scheduler)
         self.mean_mode = bool(mean_mode)
-        self.input_dtype = self._infer_input_dtype()
-
-    def _infer_input_dtype(self) -> np.dtype:
-        if self._metadata is not None:
-            input_schema = self._metadata.get("inputSchema", [])
-            for input_desc in input_schema:
-                if input_desc.get("name") == "x":
-                    dtype = input_desc.get("dataType", "")
-                    if dtype == "Float32":
-                        return np.dtype(np.float32)
-                    if dtype == "Float16":
-                        return np.dtype(np.float16)
-            return np.dtype(np.float16)
-        for input_desc in self._spec.description.input:
-            if input_desc.name == "x":
-                dtype = input_desc.type.multiArrayType.dataType
-                if dtype == FeatureTypes_pb2.ArrayFeatureType.FLOAT32:
-                    return np.dtype(np.float32)
-                if dtype == FeatureTypes_pb2.ArrayFeatureType.FLOAT16:
-                    return np.dtype(np.float16)
-        return np.dtype(np.float16)
+        self.input_dtype = get_feature_info(self.mlmodel, mlmodel_path, "x")["dtype"]
+        self._timestep_cache: dict[
+            tuple[int, int, float, bool, str],
+            tuple[np.ndarray, np.ndarray, np.ndarray],
+        ] = {}
 
     # ------------------------------------------------------------------ #
     # solver internals
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _optimized_scale(positive_flat: np.ndarray, negative_flat: np.ndarray) -> np.ndarray:
+    def _optimized_scale(
+        positive_flat: np.ndarray, negative_flat: np.ndarray
+    ) -> np.ndarray:
         dot_product = np.sum(positive_flat * negative_flat, axis=1, keepdims=True)
-        squared_norm = np.sum(negative_flat * negative_flat, axis=1, keepdims=True) + 1e-8
+        squared_norm = (
+            np.sum(negative_flat * negative_flat, axis=1, keepdims=True) + 1e-8
+        )
         return dot_product / squared_norm
+
+    def _cached_timestep_tables(
+        self,
+        n_timesteps: int,
+        hidden_size: int,
+        sway_sampling_coef: float,
+        model_dtype: np.dtype,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        dtype = np.dtype(model_dtype)
+        key = (
+            int(n_timesteps),
+            int(hidden_size),
+            float(sway_sampling_coef),
+            self.mean_mode,
+            dtype.str,
+        )
+        cached = self._timestep_cache.get(key)
+        if cached is not None:
+            return cached
+
+        t_span = np.linspace(1, 0, n_timesteps + 1, dtype=np.float32)
+        t_span = t_span + sway_sampling_coef * (np.cos(np.pi / 2 * t_span) - 1 + t_span)
+
+        t_emb = _sinusoidal_pos_emb_np(t_span[:-1], hidden_size).astype(dtype)
+        t_emb = np.ascontiguousarray(t_emb.reshape(n_timesteps, hidden_size, 1, 1))
+
+        dt_val = float(t_span[0] - t_span[1])
+        dt_emb_t = np.array(dt_val if self.mean_mode else 0.0, dtype=np.float32)
+        dt_emb = _sinusoidal_pos_emb_np(dt_emb_t, hidden_size).astype(dtype)
+        dt_emb = np.ascontiguousarray(dt_emb.reshape(hidden_size, 1, 1))
+
+        cached = (t_span, t_emb, dt_emb)
+        self._timestep_cache[key] = cached
+        return cached
 
     # ------------------------------------------------------------------ #
     # numpy-only call surface
@@ -139,13 +153,27 @@ class CoreMLUnifiedCFM:
         if rng is None:
             rng = np.random.default_rng()
         b = mu.shape[0]
-        z = rng.standard_normal((b, self.in_channels, patch_size)).astype(np.float32) * temperature
+        z = (
+            rng.standard_normal((b, self.in_channels, patch_size)).astype(np.float32)
+            * temperature
+        )
 
-        t_span = np.linspace(1, 0, n_timesteps + 1, dtype=np.float32)
-        t_span = t_span + sway_sampling_coef * (np.cos(np.pi / 2 * t_span) - 1 + t_span)
+        hidden_size = mu.shape[1] // 2
+        model_dtype = self.input_dtype.type
+        t_span, t_emb, dt_emb = self._cached_timestep_tables(
+            n_timesteps=n_timesteps,
+            hidden_size=hidden_size,
+            sway_sampling_coef=sway_sampling_coef,
+            model_dtype=model_dtype,
+        )
 
         return self._solve_euler_numpy(
-            x=z, t_span=t_span, mu=mu, cond=cond,
+            x=z,
+            t_span=t_span,
+            mu=mu,
+            cond=cond,
+            t_emb=t_emb,
+            dt_emb=dt_emb,
             cfg_value=float(cfg_value),
             use_cfg_zero_star=bool(use_cfg_zero_star),
             timings=timings,
@@ -157,6 +185,8 @@ class CoreMLUnifiedCFM:
         t_span: np.ndarray,
         mu: np.ndarray,
         cond: np.ndarray,
+        t_emb: np.ndarray,
+        dt_emb: np.ndarray,
         cfg_value: float,
         use_cfg_zero_star: bool,
         timings: dict | None = None,
@@ -190,12 +220,7 @@ class CoreMLUnifiedCFM:
         cond_in[b:] = cond_cf
         mu_in[:b] = mu_cf
 
-        if self.mean_mode:
-            dt_emb_np = _sinusoidal_pos_emb_np(np.array(dt_val), hidden_size)
-        else:
-            dt_emb_np = _sinusoidal_pos_emb_np(np.array(0.0), hidden_size)
-        dt_emb_cf = dt_emb_np.reshape(hidden_size, 1, 1).astype(model_dtype)
-        dt_emb_in[:] = dt_emb_cf
+        dt_emb_in[:] = dt_emb
 
         zero_init_steps = max(1, int(len(t_span) * 0.04))
         x_cur = x.astype(np.float32)
@@ -208,20 +233,26 @@ class CoreMLUnifiedCFM:
                 x_in[:b] = x_cur[:, :, None, :]
                 x_in[b:] = x_cur[:, :, None, :]
 
-                t_emb_np = _sinusoidal_pos_emb_np(np.array(t_val), hidden_size)
-                t_emb_in[:] = t_emb_np.reshape(hidden_size, 1, 1).astype(model_dtype)
+                t_emb_in[:] = t_emb[step - 1]
                 t_math += _time.perf_counter() - t_m0
 
                 t_p0 = _time.perf_counter()
-                out = self.mlmodel.predict({
-                    "x": x_in, "mu": mu_in, "t_emb": t_emb_in,
-                    "cond": cond_in, "dt_emb": dt_emb_in,
-                })["output"]
+                out = self.mlmodel.predict(
+                    {
+                        "x": x_in,
+                        "mu": mu_in,
+                        "t_emb": t_emb_in,
+                        "cond": cond_in,
+                        "dt_emb": dt_emb_in,
+                    }
+                )["output"]
                 t_predict += _time.perf_counter() - t_p0
                 n_predict += 1
 
                 t_m0 = _time.perf_counter()
-                out = out.astype(np.float32).reshape(two_b, self.in_channels, patch_size)
+                out = out.astype(np.float32).reshape(
+                    two_b, self.in_channels, patch_size
+                )
 
                 dphi, cfg_dphi = out[:b], out[b:]
 

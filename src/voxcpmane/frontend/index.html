@@ -101,23 +101,23 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     <textarea id="prompt-text" rows="2" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Not required if using a provided voice"></textarea>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                        <label for="max-length" class="block text-sm font-medium text-gray-300 mb-2">
-                            Max Length (0.04s per unit)
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="flex flex-col">
+                        <label for="max-length" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
+                            Max Length (~0.16s per unit)
                         </label>
-                        <input type="number" id="max-length" value="2048" min="1" max="2048" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
-                        <div class="mt-1 text-xs text-gray-500">Maximum generated sequence length (1-2048)</div>
+                        <input type="number" id="max-length" value="2048" min="1" max="2048" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        <div class="mt-1 text-xs text-gray-500">Maximum generated audio steps (1-2048)</div>
                     </div>
-                    <div>
-                        <label for="cfg-value" class="block text-sm font-medium text-gray-300 mb-2">
+                    <div class="flex flex-col">
+                        <label for="cfg-value" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
                             CFG Value
                         </label>
-                        <input type="number" id="cfg-value" value="2.0" min="0.0" max="10.0" step="0.1" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        <input type="number" id="cfg-value" value="2.0" min="0.0" max="10.0" step="0.1" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
                         <div class="mt-1 text-xs text-gray-500">Classifier-free guidance value (0.0-10.0)</div>
                     </div>
-                    <div>
-                        <label for="inference-timesteps" class="flex items-center text-sm font-medium text-gray-300 mb-2">
+                    <div class="flex flex-col">
+                        <label for="inference-timesteps" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
                             <span>Inference Timesteps</span>
 
                             <div class="relative group ml-2">
@@ -126,9 +126,23 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                                     Controls the number of diffusion steps. A higher number (e.g., 20) is slower but may increase quality. A lower number (e.g., 5-10) is faster. This model works well with 10.
                                 </div>
                             </div>
-                            </label>
-                        <input type="number" id="inference-timesteps" value="10" min="1" max="100" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        </label>
+                        <input type="number" id="inference-timesteps" value="10" min="1" max="100" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
                         <div class="mt-1 text-xs text-gray-500">Number of inference steps (1-100)</div>
+                    </div>
+                    <div class="flex flex-col">
+                        <label for="seed" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
+                            <span>Seed</span>
+
+                            <div class="relative group ml-2">
+                                <span class="w-4 h-4 flex items-center justify-center bg-gray-600 text-gray-300 text-xs font-bold rounded-full cursor-help">?</span>
+                                <div class="absolute hidden group-hover:block left-full ml-3 top-1/2 -translate-y-1/2 w-72 p-3 bg-black text-white text-sm rounded-lg shadow-lg z-10 transition-all duration-150 ease-in-out opacity-0 group-hover:opacity-100 pointer-events-none">
+                                    Leave blank for a fresh random voice each request. Set a number to reproduce the same diffusion noise.
+                                </div>
+                            </div>
+                        </label>
+                        <input type="number" id="seed" value="" min="0" step="1" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Random">
+                        <div class="mt-1 text-xs text-gray-500">Optional reproducibility seed</div>
                     </div>
                 </div>
 
@@ -143,6 +157,9 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                         <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 9.293a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"></path></svg>
                         <span id="generate-full-button-text">Generate Full Audio</span>
                         <div id="generate-full-spinner" class="hidden spinner w-5 h-5 border-t-2 border-b-2 border-white rounded-full"></div>
+                    </button>
+                    <button type="button" id="pause-playback-button" class="flex-1 bg-amber-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-amber-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                        Pause Playback
                     </button>
                     <button type="button" id="stop-button" class="flex-1 bg-gray-600 text-gray-200 font-bold py-3 px-6 rounded-lg shadow-lg hover:bg-gray-500 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
                         Stop Generation
@@ -208,6 +225,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const ttsForm = document.getElementById('tts-form');
         const playButton = document.getElementById('play-button');
         const playButtonText = document.getElementById('play-button-text');
+        const pausePlaybackButton = document.getElementById('pause-playback-button');
         const stopButton = document.getElementById('stop-button');
         const spinner = document.getElementById('spinner');
         const statusMessage = document.getElementById('status-message');
@@ -227,6 +245,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const maxLengthInput = document.getElementById('max-length');
         const cfgValueInput = document.getElementById('cfg-value');
         const inferenceTimestepsInput = document.getElementById('inference-timesteps');
+        const seedInput = document.getElementById('seed');
         
         // --- Audio Player Elements ---
         const audioPlayerContainer = document.getElementById('audio-player-container');
@@ -271,6 +290,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         let useAudioWorkletPlayback = false;
         let streamPlayerEndSent = false;
         let streamPlayerModuleUrl = null;
+        let streamPlaybackPaused = false;
+        let streamFinishTimer = null;
 
         const INITIAL_STREAM_BUFFER_SECONDS = 0.6;
         const TARGET_SCHEDULE_AHEAD_SECONDS = 1.2;
@@ -347,6 +368,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         // --- Load voices when page loads ---
         loadAvailableVoices();
 
+        pausePlaybackButton.addEventListener('click', toggleStreamPlaybackPause);
+
         // --- Utility to show status messages ---
         function showStatus(message, type = 'info') {
             statusMessage.textContent = message;
@@ -371,21 +394,27 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             if (playing) {
                 playButton.disabled = true;
                 generateFullButton.disabled = true;
+                pausePlaybackButton.disabled = false;
+                pausePlaybackButton.textContent = 'Pause Playback';
                 stopButton.disabled = false;
                 spinner.classList.remove('hidden');
                 playButtonText.textContent = 'Generating...';
             } else {
                 playButton.disabled = false;
                 generateFullButton.disabled = false;
+                pausePlaybackButton.disabled = true;
+                pausePlaybackButton.textContent = 'Pause Playback';
                 stopButton.disabled = true;
                 spinner.classList.add('hidden');
                 playButtonText.textContent = 'Generate & Play';
+                streamPlaybackPaused = false;
                 
                 generateFullSpinner.classList.add('hidden');
                 generateFullButtonText.textContent = 'Generate Full Audio';
                 
                 streamReader = null;
                 clearSchedulerTimer();
+                clearStreamFinishTimer();
                 if (streamPlayerNode) {
                     try {
                         streamPlayerNode.disconnect();
@@ -405,11 +434,48 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             if (generating) {
                 playButton.disabled = true;
                 generateFullButton.disabled = true;
+                pausePlaybackButton.disabled = true;
                 stopButton.disabled = false;
                 generateFullSpinner.classList.remove('hidden');
                 generateFullButtonText.textContent = 'Generating...';
             } else {
                 setPlayingState(false);
+            }
+        }
+
+        async function toggleStreamPlaybackPause() {
+            if (!isPlaying || !audioContext || audioContext.state === 'closed') {
+                return;
+            }
+
+            if (streamPlaybackPaused || audioContext.state === 'suspended') {
+                try {
+                    await audioContext.resume();
+                    streamPlaybackPaused = false;
+                    pausePlaybackButton.textContent = 'Pause Playback';
+                    playButtonText.textContent = playbackStarted ? 'Playing...' : 'Buffering...';
+                    scheduleBufferedAudio();
+                    if (streamEnded && !useAudioWorkletPlayback) {
+                        finishFallbackPlaybackAfterBufferedAudio();
+                    }
+                } catch (error) {
+                    console.error('Could not resume playback:', error);
+                    showStatus(`Could not resume playback: ${error.message}`, 'error');
+                }
+            } else {
+                try {
+                    streamPlaybackPaused = true;
+                    clearSchedulerTimer();
+                    clearStreamFinishTimer();
+                    await audioContext.suspend();
+                    pausePlaybackButton.textContent = 'Resume Playback';
+                    playButtonText.textContent = 'Paused (generating...)';
+                    showStatus('Playback paused. Generation continues in the background.', 'info');
+                } catch (error) {
+                    streamPlaybackPaused = false;
+                    console.error('Could not pause playback:', error);
+                    showStatus(`Could not pause playback: ${error.message}`, 'error');
+                }
             }
         }
 
@@ -421,6 +487,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 cfg_value: parseFloat(cfgValueInput.value),
                 inference_timesteps: parseInt(inferenceTimestepsInput.value)
             };
+
+            const seedValue = seedInput.value.trim();
+            if (seedValue !== '') {
+                requestBody.seed = parseInt(seedValue, 10);
+            }
 
             const referenceWavPath = referenceWavPathInput.value.trim();
             if (referenceWavPath) {
@@ -446,6 +517,13 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             if (schedulerTimer !== null) {
                 clearTimeout(schedulerTimer);
                 schedulerTimer = null;
+            }
+        }
+
+        function clearStreamFinishTimer() {
+            if (streamFinishTimer !== null) {
+                clearTimeout(streamFinishTimer);
+                streamFinishTimer = null;
             }
         }
 
@@ -647,6 +725,9 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             fadeInNextChunk = false;
             pendingSamples = new Float32Array(0);
             streamPlayerEndSent = false;
+            streamPlaybackPaused = false;
+            clearStreamFinishTimer();
+            pausePlaybackButton.textContent = 'Pause Playback';
         }
 
         function enqueueStreamChunk(pcm32Data) {
@@ -715,6 +796,9 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         function scheduleBufferedAudio() {
             clearSchedulerTimer();
             if (!audioContext || audioContext.state === 'closed' || !isPlaying) {
+                return;
+            }
+            if (streamPlaybackPaused) {
                 return;
             }
 
@@ -810,6 +894,34 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 showStatus('Playback finished.', 'success');
                 setPlayingState(false);
             }
+        }
+
+        function finishFallbackPlaybackAfterBufferedAudio() {
+            if (streamPlaybackPaused || !audioContext || audioContext.state === 'closed') {
+                return;
+            }
+            clearStreamFinishTimer();
+
+            const remainingTimeInSeconds = nextStartTime - audioContext.currentTime;
+            const delayInMs = Math.max(0, remainingTimeInSeconds * 1000) + 250;
+
+            console.log(`Playback will finish in ${remainingTimeInSeconds.toFixed(2)}s. Closing context in ${delayInMs.toFixed(0)}ms.`);
+
+            streamFinishTimer = setTimeout(() => {
+                streamFinishTimer = null;
+                if (streamPlaybackPaused) {
+                    return;
+                }
+                if (audioContext && audioContext.state !== 'closed') {
+                    audioContext.close().then(() => console.log('AudioContext closed after finishing.'));
+                    audioContext = null;
+                }
+
+                if (isPlaying) {
+                    showStatus('Playback finished.', 'success');
+                    setPlayingState(false);
+                }
+            }, delayInMs);
         }
 
         // --- Create Voice Handler ---
@@ -1094,22 +1206,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                             return;
                         }
 
-                        const remainingTimeInSeconds = nextStartTime - audioContext.currentTime;
-                        const delayInMs = Math.max(0, remainingTimeInSeconds * 1000) + 250;
-                        
-                        console.log(`Playback will finish in ${remainingTimeInSeconds.toFixed(2)}s. Closing context in ${delayInMs.toFixed(0)}ms.`);
-
-                        setTimeout(() => {
-                            if (audioContext && audioContext.state !== 'closed') {
-                                audioContext.close().then(() => console.log('AudioContext closed after finishing.'));
-                                audioContext = null;
-                            }
-                            
-                            if (isPlaying) { 
-                                showStatus('Playback finished.', 'success');
-                                setPlayingState(false);
-                            }
-                        }, delayInMs);
+                        if (streamPlaybackPaused) {
+                            showStatus('Generation finished. Resume playback to hear the buffered audio.', 'info');
+                        } else {
+                            finishFallbackPlaybackAfterBufferedAudio();
+                        }
 
                     } else {
                         if (isPlaying) {

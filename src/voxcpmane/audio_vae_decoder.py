@@ -20,10 +20,7 @@ import coremltools as ct
 import numpy as np
 
 from ._coreml_utils import (
-    PathLike,
-    discover_cache_shapes_from_schema,
-    discover_cache_shapes_from_spec_model,
-    load_compiled_metadata_entry,
+    discover_cache_shapes,
     load_coreml_model,
 )
 
@@ -89,7 +86,9 @@ class _AudioVAEDecoderBase(ABC):
             )
 
         # (P, S, D) → (D, P*S)
-        z = np.transpose(patches, (2, 0, 1)).reshape(latent_dim, num_patches * patch_size)
+        z = np.transpose(patches, (2, 0, 1)).reshape(
+            latent_dim, num_patches * patch_size
+        )
         total_frames = z.shape[-1]
 
         # Pad up to a multiple of latent_frames.
@@ -130,7 +129,7 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
 
     def __init__(
         self,
-        model_path: PathLike,
+        model_path: Path,
         latent_frames: int = DEFAULT_LATENT_FRAMES,
         latent_dim: int = DEFAULT_LATENT_DIM,
         upsample_factor: int = DEFAULT_UPSAMPLE_FACTOR,
@@ -147,13 +146,7 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
 
         self.samples_per_chunk = self.latent_frames * self.upsample_factor
 
-        if Path(model_path).suffix == ".mlmodelc":
-            metadata = load_compiled_metadata_entry(model_path)
-            self._cache_shapes = discover_cache_shapes_from_schema(
-                metadata.get("inputSchema", [])
-            )
-        else:
-            self._cache_shapes = discover_cache_shapes_from_spec_model(self.model)
+        self._cache_shapes = discover_cache_shapes(self.model, model_path)
         self._caches: List[np.ndarray] = []
         self.reset()
 
@@ -180,7 +173,30 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
         """
         expected = (1, self.latent_dim, self.latent_frames)
         z = np.ascontiguousarray(z_chunk, dtype=np.float32).reshape(expected)
+        return self._predict_and_update_caches(z)
 
+    def decode_batch(self, z_batch: np.ndarray) -> np.ndarray:
+        """Decode a variable-length latent tensor, advancing the cache.
+
+        For use with RangeDim models that accept variable ``latent_frames``.
+        Accepts any ``(1, latent_dim, N)`` input where ``N`` is within
+        the model's supported range.
+
+        Args:
+            z_batch: ``(1, latent_dim, N)`` latent features.
+
+        Returns:
+            Decoded audio of shape ``(1, 1, N * upsample_factor)``.
+        """
+        z = np.ascontiguousarray(z_batch, dtype=np.float32)
+        if z.ndim == 2:
+            z = z.reshape(1, z.shape[0], z.shape[1])
+        if z.shape[0] != 1 or z.shape[1] != self.latent_dim:
+            raise ValueError(f"expected shape (1, {self.latent_dim}, N), got {z.shape}")
+        return self._predict_and_update_caches(z)
+
+    def _predict_and_update_caches(self, z: np.ndarray) -> np.ndarray:
+        """Run predict with cache I/O and update stored caches."""
         inputs = {"z": z}
         for i, c in enumerate(self._caches):
             inputs[f"cache_{i}"] = c
@@ -191,56 +207,4 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
             np.ascontiguousarray(result[f"new_cache_{i}"], dtype=np.float32)
             for i in range(len(self._caches))
         ]
-        return result["audio"]
-
-
-class AudioVAEDecoderStateful(_AudioVAEDecoderBase):
-    """MLState variant of :class:`AudioVAEDecoder`.
-
-    Same external surface — ``decode_chunk`` /
-    :meth:`reset` / :meth:`decode_patches` — but the per-stage caches
-    live inside the CoreML model as ``MLState`` buffers instead of
-    crossing the Python ↔ CoreML boundary each step. The
-    ``.mlpackage`` has only one input (``z``) and one output
-    (``audio``); state is owned by a ``state`` handle carried on this
-    object.
-    """
-
-    def __init__(
-        self,
-        model_path: PathLike,
-        latent_frames: int = DEFAULT_LATENT_FRAMES,
-        latent_dim: int = DEFAULT_LATENT_DIM,
-        upsample_factor: int = DEFAULT_UPSAMPLE_FACTOR,
-        patch_size: int = DEFAULT_PATCH_SIZE,
-        out_sample_rate: int = DEFAULT_OUT_SAMPLE_RATE,
-        compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_ONLY,
-    ):
-        self.model = load_coreml_model(model_path, compute_units=compute_units)
-        self.latent_frames = int(latent_frames)
-        self.latent_dim = int(latent_dim)
-        self.upsample_factor = int(upsample_factor)
-        self.patch_size = int(patch_size)
-        self.out_sample_rate = int(out_sample_rate)
-        self.samples_per_chunk = self.latent_frames * self.upsample_factor
-
-        self.state = self.model.make_state()
-
-    def reset(self) -> None:
-        """Re-create the state handle so every cache buffer is zeroed."""
-        self.state = self.model.make_state()
-
-    def decode_chunk(self, z_chunk: np.ndarray) -> np.ndarray:
-        """Decode one fixed-size latent chunk, mutating state in place.
-
-        Args:
-            z_chunk: ``(1, latent_dim, latent_frames)`` or any shape that
-                reshapes to it.
-
-        Returns:
-            Decoded audio of shape ``(1, 1, samples_per_chunk)``.
-        """
-        expected = (1, self.latent_dim, self.latent_frames)
-        z = np.ascontiguousarray(z_chunk, dtype=np.float32).reshape(expected)
-        result = self.model.predict({"z": z}, state=self.state)
         return result["audio"]

@@ -8,17 +8,15 @@ Drop-in replacements for the small subset of librosa that VoxCPM's
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple
 
 import numpy as np
 import soundfile as sf
 import soxr
 
-PathLike = Union[str, Path]
-
 
 def load_audio(
-    path: PathLike,
+    path: Path,
     target_sr: int | None = None,
     mono: bool = True,
     dtype: str = "float32",

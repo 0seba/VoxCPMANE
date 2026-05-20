@@ -15,8 +15,6 @@ is imported lazily and outputs are returned on the original device/dtype.
 
 from __future__ import annotations
 
-import logging
-import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,15 +24,12 @@ import coremltools as ct
 import numpy as np
 
 from ._coreml_utils import (
-    PathLike,
     is_compiled_model_path,
     load_compiled_metadata_entry,
     load_coreml_model,
     parse_shape_text,
     select_chunk_size,
 )
-
-log = logging.getLogger("voxcpmane.lm")
 
 
 class _RuntimeKVCache:
@@ -59,7 +54,7 @@ class CoreMLMiniCPMLM:
 
     def __init__(
         self,
-        model_path: PathLike,
+        model_path: Path,
         *,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
         embed_tokens: Optional[Any] = None,
@@ -68,10 +63,10 @@ class CoreMLMiniCPMLM:
         unload_inactive_functions: bool = False,
         idle_prefill_chunk_size: Optional[int] = None,
         preload_chunk_sizes: Optional[List[int]] = None,
-        debug: bool = False,
+        keep_default_function_loaded: bool = False,
+        restrict_to_preload: bool = False,
     ):
-        self.debug = debug
-        self.model_path = str(model_path)
+        self.model_path = model_path
         self.compute_units = compute_units
         spec = None
         metadata = None
@@ -79,7 +74,7 @@ class CoreMLMiniCPMLM:
             metadata = load_compiled_metadata_entry(self.model_path)
             default_function_name = "main"
         else:
-            spec_model = ct.models.MLModel(self.model_path, skip_model_load=True)
+            spec_model = ct.models.MLModel(str(self.model_path), skip_model_load=True)
             spec = spec_model.get_spec()
             default_function_name = spec.description.defaultFunctionName or "main"
         self.model = None
@@ -90,6 +85,7 @@ class CoreMLMiniCPMLM:
         self.eager_load_functions = bool(eager_load_functions)
         self.max_function_handles = int(max_function_handles)
         self.unload_inactive_functions = bool(unload_inactive_functions)
+        self.keep_default_function_loaded = bool(keep_default_function_loaded)
         self.lifecycle_events: list[tuple[str, float]] = []
         self.idle_prefill_chunk_size = (
             int(idle_prefill_chunk_size)
@@ -100,13 +96,20 @@ class CoreMLMiniCPMLM:
         if metadata is not None:
             fn_desc = self._metadata_function_for_name(metadata, default_function_name)
             input_schema = fn_desc.get("inputSchema", [])
-            x_desc = next((i for i in input_schema if i.get("name") == "inputs_embeds"), None)
+            x_desc = next(
+                (i for i in input_schema if i.get("name") == "inputs_embeds"), None
+            )
             if x_desc is None:
                 raise ValueError("model has no 'inputs_embeds' input")
-            position_desc = next((i for i in input_schema if i.get("name") == "position_id"), None)
+            position_desc = next(
+                (i for i in input_schema if i.get("name") == "position_id"), None
+            )
             if position_desc is None:
                 raise ValueError("model has no 'position_id' input")
-            seed_desc = next((i for i in input_schema if i.get("name") == "position_index_seed"), None)
+            seed_desc = next(
+                (i for i in input_schema if i.get("name") == "position_index_seed"),
+                None,
+            )
             shape = parse_shape_text(x_desc["shape"])
             self.position_id_shape = parse_shape_text(position_desc["shape"])
             self.position_index_seed_shape = (
@@ -153,27 +156,20 @@ class CoreMLMiniCPMLM:
             self._discover_multifunction_functions_from_metadata(metadata)
         else:
             self._discover_multifunction_functions(spec)
-        if self.debug:
-            log.debug("LM %s: default_func=%s chunk_size=%d input_channels=%d "
-                      "functions=%s unload=%s idle_prefill=%s",
-                      Path(self.model_path).name, default_function_name,
-                      self.chunk_size, self.input_channels,
-                      sorted(self._function_names_by_chunk_size),
-                      self.unload_inactive_functions,
-                      self.idle_prefill_chunk_size)
         if preload_chunk_sizes:
             # Only load the exact requested functions — skip default entirely.
             self.model = None
-            self.max_function_handles = max(self.max_function_handles, len(preload_chunk_sizes))
-            if self.debug:
-                log.debug("LM %s: preload mode — loading only %s (skipping default %s)",
-                          Path(self.model_path).name, preload_chunk_sizes,
-                          default_function_name)
+            self.max_function_handles = max(
+                self.max_function_handles, len(preload_chunk_sizes)
+            )
+            if restrict_to_preload:
+                self._function_names_by_chunk_size = {
+                    cs: name
+                    for cs, name in self._function_names_by_chunk_size.items()
+                    if cs in preload_chunk_sizes
+                }
             for cs in preload_chunk_sizes:
                 if cs in self._function_names_by_chunk_size:
-                    if self.debug:
-                        log.debug("LM %s: preloading chunk_size=%d...",
-                                  Path(self.model_path).name, cs)
                     self._model_for_chunk_size(cs, profile_prefix="preload")
                 else:
                     raise ValueError(
@@ -183,14 +179,23 @@ class CoreMLMiniCPMLM:
         else:
             self.model = self._load_default_model_func(default_function_name)
             self._models_by_chunk_size[self.chunk_size] = self.model
-            if self.unload_inactive_functions and self.idle_prefill_chunk_size is not None:
-                if self.idle_prefill_chunk_size not in self._function_names_by_chunk_size:
+            if (
+                self.unload_inactive_functions
+                and self.idle_prefill_chunk_size is not None
+            ):
+                if (
+                    self.idle_prefill_chunk_size
+                    not in self._function_names_by_chunk_size
+                ):
                     raise ValueError(
                         f"idle prefill chunk size {self.idle_prefill_chunk_size} "
                         f"is not available; available sizes are "
                         f"{sorted(self._function_names_by_chunk_size)}"
                     )
-                self._unload_function(self.chunk_size, event_name=f"init/unload_function_s{self.chunk_size}")
+                self._unload_function(
+                    self.chunk_size,
+                    event_name=f"init/unload_function_s{self.chunk_size}",
+                )
                 self.model = None
                 self._model_for_chunk_size(
                     self.idle_prefill_chunk_size,
@@ -199,16 +204,8 @@ class CoreMLMiniCPMLM:
             if self.eager_load_functions:
                 n_functions = len(self._function_names_by_chunk_size)
                 if self.max_function_handles < n_functions:
-                    if self.debug:
-                        log.debug("LM %s: raising max_function_handles %d → %d for eager load",
-                                  Path(self.model_path).name,
-                                  self.max_function_handles, n_functions)
                     self.max_function_handles = n_functions
                 self._load_multifunction_handles()
-        if self.debug:
-            log.debug("LM %s: init complete, loaded_functions=%s",
-                      Path(self.model_path).name,
-                      sorted(self._models_by_chunk_size.keys()))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Tuple[Any, None]:
         return self.forward(*args, **kwargs)
@@ -267,7 +264,6 @@ class CoreMLMiniCPMLM:
         profile_prefix: str = "lm",
         preferred_chunk_size: Optional[int] = None,
     ) -> Any:
-        model_name = Path(self.model_path).name
         with self._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
             arr, restore, original_rank = self._to_numpy(inputs_embeds)
             x = self._to_nchw(arr)
@@ -280,10 +276,6 @@ class CoreMLMiniCPMLM:
             )
 
         length = x.shape[-1]
-        if self.debug:
-            log.debug("%s._run: input shape=%s length=%d reset=%s preferred_chunk=%s",
-                      model_name, x.shape, length, reset_state, preferred_chunk_size)
-            sys.stdout.flush(); sys.stderr.flush()
         chunks = []
         offset = 0
         state_needs_reset = bool(reset_state)
@@ -295,11 +287,9 @@ class CoreMLMiniCPMLM:
                 remaining,
                 preferred_chunk_size=preferred_chunk_size,
             )
-            if self.debug:
-                log.debug("%s._run: offset=%d remaining=%d chunk_size=%d pos=%d",
-                          model_name, offset, remaining, chunk_size, self.current_position)
-                sys.stdout.flush(); sys.stderr.flush()
-            with self._profile(profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"):
+            with self._profile(
+                profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"
+            ):
                 chunk = np.ascontiguousarray(
                     x[..., offset : offset + chunk_size],
                     dtype=np.float32,
@@ -312,52 +302,21 @@ class CoreMLMiniCPMLM:
                 if self.position_index_seed_shape is not None:
                     model_inputs["position_index_seed"] = np.zeros(
                         (chunk_size,), dtype=np.int32
-            )
-            if self.debug:
-                already = chunk_size in self._models_by_chunk_size
-                log.debug("%s._run: _model_for_chunk_size(%d) [%s]",
-                          model_name, chunk_size,
-                          "cached" if already else "LOADING")
-                sys.stdout.flush(); sys.stderr.flush()
+                    )
             model = self._model_for_chunk_size(
                 chunk_size,
                 profiler=profiler,
                 profile_prefix=profile_prefix,
             )
-            if self.debug:
-                log.debug("%s._run: model ready, loaded_sizes=%s",
-                          model_name, sorted(self._models_by_chunk_size.keys()))
             if state_needs_reset or self.state is None:
-                if self.debug:
-                    log.debug("%s._run: make_state...", model_name)
-                    sys.stdout.flush(); sys.stderr.flush()
-                with self._profile(profiler, f"{profile_prefix}/make_state_s{chunk_size}"):
+                with self._profile(
+                    profiler, f"{profile_prefix}/make_state_s{chunk_size}"
+                ):
                     self.state = model.make_state()
-                if self.debug:
-                    log.debug("%s._run: make_state done", model_name)
-                    sys.stdout.flush(); sys.stderr.flush()
                 state_needs_reset = False
-            if self.debug:
-                log.debug("%s._run: predict(chunk=%s, pos=%s, pad=%d)...",
-                          model_name, chunk.shape, position_id, pad)
-                sys.stdout.flush(); sys.stderr.flush()
-            t_predict = time.perf_counter()
             with self._profile(profiler, f"{profile_prefix}/predict_s{chunk_size}"):
                 result = model.predict(model_inputs, state=self.state)
                 hidden_states = result["hidden_states"]
-            if self.debug:
-                log.debug("%s._run: predict done in %.3fs, hidden=%s",
-                          model_name, time.perf_counter() - t_predict, hidden_states.shape)
-                sys.stdout.flush(); sys.stderr.flush()
-            if (
-                self.unload_inactive_functions
-                and preferred_chunk_size is not None
-                and chunk_size != self.chunk_size
-            ):
-                with self._profile(
-                    profiler, f"{profile_prefix}/unload_function_s{chunk_size}"
-                ):
-                    self._unload_function(chunk_size)
             chunks.append(hidden_states[..., :remaining] if pad else hidden_states)
             self.current_position += remaining if pad else chunk_size
             offset += remaining if pad else chunk_size
@@ -420,7 +379,9 @@ class CoreMLMiniCPMLM:
             if chunk_size in self._models_by_chunk_size:
                 continue
             input_schema = function.get("inputSchema", [])
-            x_desc = next((i for i in input_schema if i.get("name") == "inputs_embeds"), None)
+            x_desc = next(
+                (i for i in input_schema if i.get("name") == "inputs_embeds"), None
+            )
             if x_desc is None:
                 continue
             shape = parse_shape_text(x_desc["shape"])
@@ -457,7 +418,14 @@ class CoreMLMiniCPMLM:
         model = self._models_by_chunk_size.get(self.chunk_size)
         if model is not None:
             return model
-        return self._model_for_chunk_size(self.chunk_size)
+        # If native chunk_size was filtered out (single-length mode),
+        # return any currently loaded model or load the smallest available.
+        if self._models_by_chunk_size:
+            return next(iter(self._models_by_chunk_size.values()))
+        cs = self.chunk_size
+        if cs not in self._function_names_by_chunk_size:
+            cs = min(self._function_names_by_chunk_size)
+        return self._model_for_chunk_size(cs)
 
     def _load_default_model_func(self, default_function_name: str) -> Any:
         t0 = time.perf_counter()
@@ -481,6 +449,11 @@ class CoreMLMiniCPMLM:
     ) -> ct.models.MLModel:
         model = self._models_by_chunk_size.get(chunk_size)
         if model is not None:
+            if self.unload_inactive_functions:
+                self._unload_inactive_function_handles(
+                    active_chunk_size=chunk_size,
+                    profile_prefix=profile_prefix,
+                )
             return model
 
         name = self._function_names_by_chunk_size[chunk_size]
@@ -496,12 +469,10 @@ class CoreMLMiniCPMLM:
             self.lifecycle_events.append((event_name, time.perf_counter() - t0))
         if self.max_function_handles >= 1:
             if self.unload_inactive_functions:
-                for loaded_size in list(self._models_by_chunk_size):
-                    if loaded_size not in (self.chunk_size, chunk_size):
-                        self._unload_function(
-                            loaded_size,
-                            event_name=f"{profile_prefix}/unload_function_s{loaded_size}",
-                        )
+                self._unload_inactive_function_handles(
+                    active_chunk_size=chunk_size,
+                    profile_prefix=profile_prefix,
+                )
             else:
                 loaded_extra = [
                     size
@@ -516,6 +487,22 @@ class CoreMLMiniCPMLM:
                     )
             self._models_by_chunk_size[chunk_size] = model
         return model
+
+    def _unload_inactive_function_handles(
+        self,
+        *,
+        active_chunk_size: int,
+        profile_prefix: str,
+    ) -> None:
+        keep_sizes = {active_chunk_size}
+        if self.keep_default_function_loaded:
+            keep_sizes.add(self.chunk_size)
+        for loaded_size in list(self._models_by_chunk_size):
+            if loaded_size not in keep_sizes:
+                self._unload_function(
+                    loaded_size,
+                    event_name=f"{profile_prefix}/unload_function_s{loaded_size}",
+                )
 
     def _unload_function(
         self,
@@ -588,7 +575,9 @@ class CoreMLMiniCPMLM:
         )
 
     @staticmethod
-    def _metadata_function_for_name(metadata: dict, function_name: Optional[str]) -> dict:
+    def _metadata_function_for_name(
+        metadata: dict, function_name: Optional[str]
+    ) -> dict:
         functions = metadata.get("functions", [])
         if not functions:
             return metadata
@@ -635,7 +624,9 @@ class CoreMLMiniCPMLM:
             return np.ascontiguousarray(x[:, :, None, None], dtype=np.float32)
         if x.ndim == 3:
             # (B, T, C) -> (B, C, 1, T)
-            return np.ascontiguousarray(np.transpose(x, (0, 2, 1))[:, :, None, :], dtype=np.float32)
+            return np.ascontiguousarray(
+                np.transpose(x, (0, 2, 1))[:, :, None, :], dtype=np.float32
+            )
         if x.ndim == 4:
             return np.ascontiguousarray(x, dtype=np.float32)
         raise ValueError(f"expected rank 2, 3, or 4 input, got shape {x.shape}")
@@ -666,7 +657,7 @@ class CoreMLMiniCPMLMChain:
 
     def __init__(
         self,
-        model_paths: Sequence[PathLike],
+        model_paths: Sequence[Path],
         *,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
         embed_tokens: Optional[Any] = None,
@@ -674,7 +665,7 @@ class CoreMLMiniCPMLMChain:
         if len(model_paths) < 1:
             raise ValueError("at least one model path required")
         self.submodels: List[CoreMLMiniCPMLM] = [
-            CoreMLMiniCPMLM(str(p), compute_units=compute_units) for p in model_paths
+            CoreMLMiniCPMLM(p, compute_units=compute_units) for p in model_paths
         ]
         self.current_position = 0
         self.embed_tokens = embed_tokens
@@ -684,11 +675,12 @@ class CoreMLMiniCPMLMChain:
             (m.batch_size, m.input_channels, m.spatial_dim, m.chunk_size)
             for m in self.submodels
         ]
-        if not all(s[0] == shapes[0][0] and s[2] == shapes[0][2] and s[3] == shapes[0][3] for s in shapes):
+        if not all(
+            s[0] == shapes[0][0] and s[2] == shapes[0][2] and s[3] == shapes[0][3]
+            for s in shapes
+        ):
             raise ValueError(f"submodel input shapes differ in B/H/S: {shapes}")
-        chunk_sets = [
-            set(m._function_names_by_chunk_size) for m in self.submodels
-        ]
+        chunk_sets = [set(m._function_names_by_chunk_size) for m in self.submodels]
         if not all(chunks == chunk_sets[0] for chunks in chunk_sets):
             raise ValueError(f"submodel multifunction lengths differ: {chunk_sets}")
 
@@ -718,13 +710,16 @@ class CoreMLMiniCPMLMChain:
         preferred_chunk_size: Optional[int] = None,
     ) -> Tuple[Any, None]:
         _ = is_causal
-        return self._run(
-            inputs_embeds,
-            reset_state=reset_state,
-            profiler=profiler,
-            profile_prefix=profile_prefix,
-            preferred_chunk_size=preferred_chunk_size,
-        ), None
+        return (
+            self._run(
+                inputs_embeds,
+                reset_state=reset_state,
+                profiler=profiler,
+                profile_prefix=profile_prefix,
+                preferred_chunk_size=preferred_chunk_size,
+            ),
+            None,
+        )
 
     def forward_step(
         self,

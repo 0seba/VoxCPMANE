@@ -18,10 +18,7 @@ import coremltools as ct
 import numpy as np
 
 from ._coreml_utils import (
-    PathLike,
-    discover_cache_shapes_from_schema,
-    discover_cache_shapes_from_spec_model,
-    load_compiled_metadata_entry,
+    discover_cache_shapes,
     load_coreml_model,
 )
 from .audio_io import load_audio
@@ -48,7 +45,7 @@ class AudioVAEEncoder:
 
     def __init__(
         self,
-        model_path: PathLike,
+        model_path: Path,
         chunk_samples: int,
         hop_length: int = DEFAULT_HOP_LENGTH,
         latent_dim: int = DEFAULT_LATENT_DIM,
@@ -71,13 +68,7 @@ class AudioVAEEncoder:
             )
         self.frames_per_chunk = self.chunk_samples // self.hop_length
 
-        if Path(model_path).suffix == ".mlmodelc":
-            metadata = load_compiled_metadata_entry(model_path)
-            self._cache_shapes = discover_cache_shapes_from_schema(
-                metadata.get("inputSchema", [])
-            )
-        else:
-            self._cache_shapes = discover_cache_shapes_from_spec_model(self.model)
+        self._cache_shapes = discover_cache_shapes(self.model, model_path)
         self._caches: List[np.ndarray] = []
         self.reset()
 
@@ -137,7 +128,7 @@ class AudioVAEEncoder:
     # ------------------------------------------------------------------ #
     def encode_wav(
         self,
-        wav_path: PathLike,
+        wav_path: Path,
         padding_mode: str = "right",
     ) -> np.ndarray:
         """Load a WAV file, resample, pad, and encode into VoxCPM patches.
@@ -185,7 +176,9 @@ class AudioVAEEncoder:
             return np.pad(audio, (pad, 0))
         if padding_mode == "right":
             return np.pad(audio, (0, pad))
-        raise ValueError(f"padding_mode must be 'left' or 'right', got {padding_mode!r}")
+        raise ValueError(
+            f"padding_mode must be 'left' or 'right', got {padding_mode!r}"
+        )
 
     def _pad_to_chunk(self, audio: np.ndarray) -> np.ndarray:
         remainder = len(audio) % self.chunk_samples
