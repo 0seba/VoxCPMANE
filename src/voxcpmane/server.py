@@ -109,7 +109,7 @@ def load_model(
     model_dir: str | None = None,
     embedding_path: str | None = None,
     lm_mode: str = "hot-swap",
-    lm_prefill_chunk_size: int | None = None,
+    lm_prefill_chunk_size: int | None = 128,
     lm_async_decode_load: bool = False,
     base_lm_splits: int = 2,
     compiled_fallback_dir: str | None = None,
@@ -1000,11 +1000,11 @@ def main():
         "--lm-prefill-chunk-size",
         type=int,
         choices=LM_MULTIFUNCTION_PREFILL_LENGTHS,
-        default=None,
+        default=128,
         help=(
-            "LM chunk length for prompt prefill. By default fp16 split packages "
-            "use their native s4 chunking, while W8 multifunction packages use "
-            f"stable length_1. Multifunction choices: {LM_MULTIFUNCTION_PREFILL_LENGTHS}."
+            "LM chunk length for prompt prefill (default: 128). Available "
+            "values are 1, 8, 16, 32, 64, and 128; these lengths can also "
+            "be used with --lm-mode single-length."
         ),
     )
     parser.add_argument(
