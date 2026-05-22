@@ -28,7 +28,6 @@ from ._coreml_utils import (
     load_compiled_metadata_entry,
     load_coreml_model,
     parse_shape_text,
-    select_chunk_size,
 )
 
 
@@ -400,12 +399,9 @@ class CoreMLMiniCPMLM:
             length = x.shape[-1]
             chunks = []
             offset = 0
+            chunk_size = preferred_chunk_size if preferred_chunk_size is not None else self.chunk_size
             while offset < length:
                 remaining = length - offset
-                chunk_size = self._select_chunk_size(
-                    remaining,
-                    preferred_chunk_size=preferred_chunk_size,
-                )
                 consumed = min(remaining, chunk_size)
                 with self._profile(
                     profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"
@@ -451,12 +447,9 @@ class CoreMLMiniCPMLM:
         state_needs_reset = bool(reset_state)
         if state_needs_reset:
             self.current_position = 0
+        chunk_size = preferred_chunk_size if preferred_chunk_size is not None else self.chunk_size
         while offset < length:
             remaining = length - offset
-            chunk_size = self._select_chunk_size(
-                remaining,
-                preferred_chunk_size=preferred_chunk_size,
-            )
             with self._profile(
                 profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"
             ):
@@ -682,19 +675,6 @@ class CoreMLMiniCPMLM:
         events = self.lifecycle_events
         self.lifecycle_events = []
         return events
-
-    def _select_chunk_size(
-        self,
-        remaining: int,
-        *,
-        preferred_chunk_size: Optional[int] = None,
-    ) -> int:
-        return select_chunk_size(
-            remaining,
-            self._function_names_by_chunk_size,
-            self.chunk_size,
-            preferred_chunk_size=preferred_chunk_size,
-        )
 
     @staticmethod
     @contextmanager

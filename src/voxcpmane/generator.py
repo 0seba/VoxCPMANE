@@ -490,16 +490,13 @@ class VoxCPM2Generator:
             self.fsq_fixed_chunk_size = int(lengths[0])
 
     def _select_fsq_enumerated_chunk(
-        self, preferred: int | None, remaining: int
+        self, preferred: int | None
     ) -> int:
         lengths = self.fsq_enumerated_seq_lengths
         if not lengths:
             return int(self.fsq_fixed_chunk_size)
         if preferred is not None and int(preferred) in lengths:
             return int(preferred)
-        for length in sorted(lengths, reverse=True):
-            if length <= remaining:
-                return int(length)
         return int(lengths[0])
 
     def _fsq(
@@ -522,7 +519,7 @@ class VoxCPM2Generator:
             return np.concatenate(out_chunks, axis=-1).astype(np.float32)
 
         if self.fsq_enumerated_seq_lengths:
-            chunk = self._select_fsq_enumerated_chunk(preferred_chunk_size, S)
+            chunk = self._select_fsq_enumerated_chunk(preferred_chunk_size)
         else:
             chunk = int(self.fsq_fixed_chunk_size)
 

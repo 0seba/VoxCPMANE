@@ -64,11 +64,7 @@ def resolve_model_path(
 def load_compiled_metadata_entry(path: Path) -> dict:
     """Read the first entry from the ``metadata.json`` sidecar."""
     metadata_path = path / "metadata.json"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"missing compiled metadata file: {metadata_path}")
     raw = json.loads(metadata_path.read_text())
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"unexpected metadata format in {metadata_path}")
     return raw[0]
 
 
@@ -223,28 +219,3 @@ def get_feature_info(
             ),
         )
 
-
-def select_chunk_size(
-    remaining: int,
-    function_names_by_chunk_size: dict[int, str],
-    default_chunk_size: int,
-    *,
-    preferred_chunk_size: int | None = None,
-) -> int:
-    """Pick the best chunk size for *remaining* tokens."""
-    if preferred_chunk_size is not None:
-        preferred = int(preferred_chunk_size)
-        if preferred not in function_names_by_chunk_size:
-            raise ValueError(
-                f"preferred chunk size {preferred} is not available; "
-                f"available sizes are {sorted(function_names_by_chunk_size)}"
-            )
-        return preferred
-    for chunk_size in sorted(function_names_by_chunk_size, reverse=True):
-        if chunk_size <= remaining:
-            return chunk_size
-    return (
-        min(function_names_by_chunk_size)
-        if function_names_by_chunk_size
-        else default_chunk_size
-    )
