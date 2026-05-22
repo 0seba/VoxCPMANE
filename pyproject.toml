@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "voxcpmane"
+name = "voxcpmane2"
 version = "0.1.0"
 description = "VoxCPM2 TTS runtime + HTTP server for Apple Neural Engine"
 requires-python = ">=3.10,<3.13"
@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.scripts]
-voxcpmane-server = "voxcpmane.server:main"
+voxcpmane2-server = "voxcpmane.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voxcpmane"]
