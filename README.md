@@ -1,5 +1,11 @@
 # VoxCPMANE2
 
+Install the VoxCPM2 package:
+
+```bash
+uv pip install -U voxcpmane2
+```
+
 VoxCPMANE2 is the VoxCPM2 version of [VoxCPMANE](../VoxCPMANE). It provides a
 pure numpy/CoreML runtime and FastAPI HTTP server for running VoxCPM2 TTS on
 Apple Silicon with Apple Neural Engine acceleration.
@@ -25,22 +31,25 @@ by default.
 
 ## Installation
 
-From this directory:
+Install with `uv`:
 
 ```bash
-uv sync
+uv pip install -U voxcpmane2
 ```
 
-For editable development:
+Or install with `pip`:
 
 ```bash
-uv pip install -e .
+pip install -U voxcpmane2
 ```
+
+For editable development from a source checkout, run `uv pip install -e .` from
+this directory.
 
 ## Run The Server
 
 ```bash
-uv run voxcpmane2-server
+voxcpmane2-server
 ```
 
 The server starts on `http://localhost:8000` by default. Open the root URL for
@@ -49,7 +58,7 @@ the web playground.
 Common options:
 
 ```bash
-uv run voxcpmane2-server \
+voxcpmane2-server \
   --host 0.0.0.0 \
   --port 8000 \
   --repo-id seba/VoxCPM2ANE-Preview \
@@ -83,16 +92,16 @@ Examples:
 
 ```bash
 # Default hot-swap behavior with prefill length 128.
-uv run voxcpmane2-server --lm-mode hot-swap
+voxcpmane2-server --lm-mode hot-swap
 
 # Keep both prefill and decode functions resident.
-uv run voxcpmane2-server --lm-mode always-loaded
+voxcpmane2-server --lm-mode always-loaded
 
 # Preload decode and prefill, but unload prefill during decode.
-uv run voxcpmane2-server --lm-mode preload
+voxcpmane2-server --lm-mode preload
 
 # Use only one LM function length.
-uv run voxcpmane2-server --lm-prefill-chunk-size 128 --lm-mode single-length
+voxcpmane2-server --lm-prefill-chunk-size 128 --lm-mode single-length
 ```
 
 ## Model Path Options
@@ -100,14 +109,14 @@ uv run voxcpmane2-server --lm-prefill-chunk-size 128 --lm-mode single-length
 You can point the server at a complete model directory:
 
 ```bash
-uv run voxcpmane2-server --model-dir /path/to/VoxCPM2-ANE
-uv run voxcpmane2-server --repo-id seba/VoxCPM2ANE-Preview
+voxcpmane2-server --model-dir /path/to/VoxCPM2-ANE
+voxcpmane2-server --repo-id seba/VoxCPM2ANE-Preview
 ```
 
 Or override individual CoreML packages:
 
 ```bash
-uv run voxcpmane2-server \
+voxcpmane2-server \
   --base-lm-path /path/to/base_lm_multifunction.mlpackage \
   --residual-lm-path /path/to/residual_lm_fused_multifunction.mlpackage \
   --locdit-path /path/to/locdit_p4_c4.mlpackage \
@@ -128,7 +137,7 @@ exists. If neither is available, the server downloads only `caches/*` from
 packages again.
 
 ```bash
-uv run voxcpmane2-server \
+voxcpmane2-server \
   --model-dir /path/to/local-models \
   --included-voice-cache-dir /path/to/local-models/caches
 ```
@@ -246,8 +255,8 @@ prompt-continuation cloning.
 Use `--live-rtf` to print real-time-factor metrics:
 
 ```bash
-uv run voxcpmane2-server --live-rtf live
-uv run voxcpmane2-server --live-rtf final
+voxcpmane2-server --live-rtf live
+voxcpmane2-server --live-rtf final
 ```
 
 VAE streaming latency can be tuned with:
