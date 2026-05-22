@@ -7,12 +7,11 @@ import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Generator, Iterable, Sequence
+from typing import Callable, Generator, Sequence
 
 import coremltools as ct
 import numpy as np
 import soundfile as sf
-from safetensors import safe_open
 
 from ._coreml_utils import (
     get_feature_info,
@@ -21,137 +20,10 @@ from ._coreml_utils import (
 )
 from .audio_vae_decoder import AudioVAEDecoder
 from .audio_vae_encoder import AudioVAEEncoder
+from .embeddings import load_embed_tokens, load_embed_tokens_from_safetensors
 from .feat_encoder import FeatEncoder
 from .lm import CoreMLMiniCPMLM
 from .locdit import CoreMLUnifiedCFM
-
-DEFAULT_EMBEDDING_KEYS = (
-    "tts_model.base_lm.embed_tokens.weight",
-    "base_lm.embed_tokens.weight",
-    "model.tts_model.base_lm.embed_tokens.weight",
-    "lm.embed_tokens.weight",
-    "embed_tokens.weight",
-)
-
-
-
-
-def _iter_safetensors_files(path: Path) -> Iterable[Path]:
-    root = path
-    if root.is_file():
-        yield root
-        return
-    if not root.exists():
-        raise FileNotFoundError(f"safetensors path does not exist: {root}")
-    direct = sorted(root.glob("*.safetensors"))
-    nested = (
-        sorted((root / "snapshots").glob("*/*.safetensors"))
-        if (root / "snapshots").exists()
-        else []
-    )
-    for file in (*direct, *nested):
-        yield file
-
-
-def load_embed_tokens_from_safetensors(
-    path: Path,
-    *,
-    key: str | None = None,
-) -> np.ndarray:
-    """Load the LM token embedding table from a safetensors file or directory."""
-
-    keys = (key,) if key is not None else DEFAULT_EMBEDDING_KEYS
-    suffixes = tuple(k for k in keys if k)
-    candidates = list(_iter_safetensors_files(path))
-    if not candidates:
-        raise FileNotFoundError(f"no .safetensors files found under {path}")
-
-    available: list[str] = []
-    for file in candidates:
-        with safe_open(str(file), framework="np") as tensors:
-            file_keys = list(tensors.keys())
-            available.extend(file_keys)
-            selected = next((name for name in keys if name in file_keys), None)
-            if selected is None and key is None:
-                matches = [name for name in file_keys if name.endswith(suffixes)]
-                if len(matches) == 1:
-                    selected = matches[0]
-            if selected is not None:
-                try:
-                    return tensors.get_tensor(selected).astype(np.float32)
-                except TypeError as exc:
-                    if "bfloat16" not in str(exc):
-                        raise
-                    try:
-                        import ml_dtypes  # noqa: F401
-                    except ImportError as import_exc:
-                        raise TypeError(
-                            f"embedding tensor {selected!r} in {file} uses "
-                            "bfloat16; install ml-dtypes or run with "
-                            "`uv run --extra conversion ...` after syncing."
-                        ) from import_exc
-                    return tensors.get_tensor(selected).astype(np.float32)
-
-    preview = ", ".join(sorted(set(available))[:12])
-    raise KeyError(
-        f"could not find embedding tensor in safetensors files under {path}; "
-        f"looked for {', '.join(keys)}. Available keys include: {preview}"
-    )
-
-
-def _resolve_hf_cache_dir(
-    repo_id: str = "openbmb/VoxCPM2",
-) -> Path | None:
-    """Return the latest local HuggingFace snapshot for *repo_id*, if cached."""
-    hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
-    repo_dir = hf_cache / f"models--{repo_id.replace('/', '--')}"
-    snapshots = repo_dir / "snapshots"
-    if not snapshots.is_dir():
-        return None
-    candidates = sorted(
-        snapshots.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-    return candidates[0] if candidates else None
-
-
-def load_embed_tokens(
-    path: Path | None = None,
-    *,
-    key: str | None = None,
-    hf_repo_id: str = "openbmb/VoxCPM2",
-) -> np.ndarray:
-    """Load the LM token embedding table from numpy, safetensors, or HF cache."""
-    search_path = path
-
-    if search_path is not None:
-        if search_path.is_file() and search_path.suffix == ".npy":
-            return np.load(str(search_path)).astype(np.float32)
-
-        if search_path.is_dir():
-            npy = search_path / "embed_tokens.npy"
-            if npy.exists():
-                return np.load(str(npy)).astype(np.float32)
-
-    if search_path is not None:
-        try:
-            return load_embed_tokens_from_safetensors(search_path, key=key)
-        except (FileNotFoundError, KeyError):
-            pass  # fall through to HF cache
-
-    hf_dir = _resolve_hf_cache_dir(hf_repo_id)
-    if hf_dir is not None:
-        try:
-            return load_embed_tokens_from_safetensors(hf_dir, key=key)
-        except (FileNotFoundError, KeyError):
-            pass
-
-    locations = [str(search_path)] if search_path else []
-    if hf_dir:
-        locations.append(f"HF cache ({hf_dir})")
-    raise FileNotFoundError(
-        "could not find embed_tokens — searched: "
-        + ", ".join(locations or ["(no paths given)"])
-    )
 
 
 class VoxCPM2Generator:
@@ -194,7 +66,7 @@ class VoxCPM2Generator:
         lm_keep_decode_function_loaded: bool = False,
         # CoreML compute units
         lm_compute_units=ct.ComputeUnit.CPU_AND_NE,
-        feat_compute_units=ct.ComputeUnit.ALL,
+        feat_compute_units=ct.ComputeUnit.CPU_AND_NE,
         locdit_compute_units=ct.ComputeUnit.CPU_AND_NE,
         vae_encoder_compute_units=ct.ComputeUnit.CPU_ONLY,
         vae_decoder_compute_units=ct.ComputeUnit.CPU_ONLY,
@@ -217,7 +89,7 @@ class VoxCPM2Generator:
                 embedding_safetensors_path or mdir,
                 key=embedding_key,
             )
-        self.embed_tokens = embed_tokens.astype(np.float32)
+        self.embed_tokens = embed_tokens.astype(np.float16)
         self.scale_emb = scale_emb
         self.audio_start_token = audio_start_token
         self.audio_end_token = audio_end_token
@@ -506,8 +378,7 @@ class VoxCPM2Generator:
         preferred_chunk_size: int | None = None,
     ) -> np.ndarray:
         """FSQ on NCHW tensor (1, C, 1, S) with chunked processing."""
-        B, C, _, S = x.shape
-        del B, C
+        _, _, _, S = x.shape
         if self.fsq_range_max_seq_length is not None:
             max_chunk = int(self.fsq_range_max_seq_length)
             chunk = min(int(preferred_chunk_size or max_chunk), max_chunk)
@@ -562,14 +433,6 @@ class VoxCPM2Generator:
             )
         return np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
 
-    def _validate_audio_feature(self, name: str, feat: np.ndarray) -> None:
-        expected = (self.patch_size, self.latent_dim)
-        if feat.ndim != 3 or feat.shape[1:] != expected:
-            raise ValueError(
-                f"{name} must have shape (T, {expected[0]}, {expected[1]}), "
-                f"got {feat.shape}"
-            )
-
     def _embed_cache_or_none(
         self,
         name: str,
@@ -607,12 +470,6 @@ class VoxCPM2Generator:
         if value is None:
             return None
         context = np.asarray(value, dtype=np.float32)
-        if context.ndim != 3:
-            raise ValueError(
-                "prompt_decode_context must have shape "
-                f"(N, {self.patch_size}, {self.latent_dim}) or "
-                f"(N, {self.latent_dim}, {self.patch_size}); got {context.shape}"
-            )
         if context.shape[1:] == (self.latent_dim, self.patch_size):
             return np.transpose(context, (0, 2, 1))
         if context.shape[1:] == (self.patch_size, self.latent_dim):
@@ -687,8 +544,7 @@ class VoxCPM2Generator:
             embed=reference_audio_embed,
             padding_mode="right",
         )
-        self._validate_audio_feature("prompt_audio_feat", prompt_feat)
-        self._validate_audio_feature("reference_audio_feat", ref_feat)
+
         prompt_embed_cache = self._embed_cache_or_none(
             "prompt_audio_embed", prompt_audio_embed, prompt_feat
         )
@@ -1238,25 +1094,15 @@ class VoxCPM2Generator:
             metrics_callback(
                 "prefill",
                 {
-                    "prefill_seconds": float(state.get("prefill_seconds", 0.0)),
-                    "prefill_tokens": int(state.get("prefill_tokens", 0)),
-                    "prefill_stage_seconds": dict(
-                        state.get("prefill_stage_seconds", {})
-                    ),
-                    "prefill_text_tokens": int(state.get("prefill_text_tokens", 0)),
-                    "prefill_audio_tokens": int(state.get("prefill_audio_tokens", 0)),
-                    "prefill_reference_audio_tokens": int(
-                        state.get("prefill_reference_audio_tokens", 0)
-                    ),
-                    "prefill_prompt_audio_tokens": int(
-                        state.get("prefill_prompt_audio_tokens", 0)
-                    ),
-                    "prefill_lm_prefix_cache": bool(
-                        state.get("prefill_lm_prefix_cache", False)
-                    ),
-                    "prefill_lm_prefix_tokens": int(
-                        state.get("prefill_lm_prefix_tokens", 0)
-                    ),
+                    "prefill_seconds": state["prefill_seconds"],
+                    "prefill_tokens": state["prefill_tokens"],
+                    "prefill_stage_seconds": state["prefill_stage_seconds"],
+                    "prefill_text_tokens": state["prefill_text_tokens"],
+                    "prefill_audio_tokens": state["prefill_audio_tokens"],
+                    "prefill_reference_audio_tokens": state["prefill_reference_audio_tokens"],
+                    "prefill_prompt_audio_tokens": state["prefill_prompt_audio_tokens"],
+                    "prefill_lm_prefix_cache": state["prefill_lm_prefix_cache"],
+                    "prefill_lm_prefix_tokens": state["prefill_lm_prefix_tokens"],
                     "at": prefill_done_at,
                 },
             )

@@ -99,16 +99,7 @@ class FeatEncoder:
         are recovered only at the output. The final chunk is zero-
         padded to ``chunk_patches`` and trimmed after concat.
         """
-        if patches.ndim != 4:
-            raise ValueError(
-                f"expected patches of shape (B, T, P, D), got {patches.shape}"
-            )
         B, T, P, D = patches.shape
-        if P != self.patch_size or D != self.feat_dim:
-            raise ValueError(
-                f"patch_size / feat_dim mismatch: model expects "
-                f"({self.patch_size}, {self.feat_dim}), got ({P}, {D})"
-            )
 
         # (B, T, P, D) → (B*T, D, 1, P)
         flat = patches.reshape(B * T, P, D)

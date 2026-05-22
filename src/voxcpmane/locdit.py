@@ -64,10 +64,10 @@ class CoreMLUnifiedCFM:
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
     ):
         self.mlmodel = load_coreml_model(mlmodel_path, compute_units=compute_units)
-        self.in_channels = int(in_channels)
-        self.sigma_min = float(sigma_min)
-        self.t_scheduler = str(t_scheduler)
-        self.mean_mode = bool(mean_mode)
+        self.in_channels = in_channels
+        self.sigma_min = sigma_min
+        self.t_scheduler = t_scheduler
+        self.mean_mode = mean_mode
         self.input_dtype = get_feature_info(self.mlmodel, mlmodel_path, "x")["dtype"]
         self._timestep_cache: dict[
             tuple[int, int, float, bool, str],

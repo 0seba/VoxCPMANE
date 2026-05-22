@@ -71,19 +71,7 @@ class _AudioVAEDecoderBase(ABC):
         the latent sequence is zero-padded on the right and the
         corresponding trailing audio samples are dropped.
         """
-        if patches.ndim != 3:
-            raise ValueError(
-                f"expected patches of shape (P, S, D), got {patches.shape}"
-            )
         num_patches, patch_size, latent_dim = patches.shape
-        if latent_dim != self.latent_dim:
-            raise ValueError(
-                f"latent_dim mismatch: got {latent_dim}, expected {self.latent_dim}"
-            )
-        if patch_size != self.patch_size:
-            raise ValueError(
-                f"patch_size mismatch: got {patch_size}, expected {self.patch_size}"
-            )
 
         # (P, S, D) → (D, P*S)
         z = np.transpose(patches, (2, 0, 1)).reshape(
@@ -138,11 +126,11 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_ONLY,
     ):
         self.model = load_coreml_model(model_path, compute_units=compute_units)
-        self.latent_frames = int(latent_frames)
-        self.latent_dim = int(latent_dim)
-        self.upsample_factor = int(upsample_factor)
-        self.patch_size = int(patch_size)
-        self.out_sample_rate = int(out_sample_rate)
+        self.latent_frames = latent_frames
+        self.latent_dim = latent_dim
+        self.upsample_factor = upsample_factor
+        self.patch_size = patch_size
+        self.out_sample_rate = out_sample_rate
 
         self.samples_per_chunk = self.latent_frames * self.upsample_factor
 
@@ -159,7 +147,7 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
 
     @property
     def cache_shapes(self) -> List[Tuple[int, ...]]:
-        return list(self._cache_shapes)
+        return self._cache_shapes
 
     def decode_chunk(self, z_chunk: np.ndarray) -> np.ndarray:
         """Decode one fixed-size latent chunk, advancing the cache.
@@ -191,8 +179,6 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
         z = np.ascontiguousarray(z_batch, dtype=np.float32)
         if z.ndim == 2:
             z = z.reshape(1, z.shape[0], z.shape[1])
-        if z.shape[0] != 1 or z.shape[1] != self.latent_dim:
-            raise ValueError(f"expected shape (1, {self.latent_dim}, N), got {z.shape}")
         return self._predict_and_update_caches(z)
 
     def _predict_and_update_caches(self, z: np.ndarray) -> np.ndarray:
@@ -204,7 +190,7 @@ class AudioVAEDecoder(_AudioVAEDecoderBase):
         result = self.model.predict(inputs)
 
         self._caches = [
-            np.ascontiguousarray(result[f"new_cache_{i}"], dtype=np.float32)
+            result[f"new_cache_{i}"]
             for i in range(len(self._caches))
         ]
         return result["audio"]

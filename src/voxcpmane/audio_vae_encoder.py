@@ -54,11 +54,11 @@ class AudioVAEEncoder:
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_ONLY,
     ):
         self.model = load_coreml_model(model_path, compute_units=compute_units)
-        self.chunk_samples = int(chunk_samples)
-        self.hop_length = int(hop_length)
-        self.latent_dim = int(latent_dim)
-        self.patch_size = int(patch_size)
-        self.sample_rate = int(sample_rate)
+        self.chunk_samples = chunk_samples
+        self.hop_length = hop_length
+        self.latent_dim = latent_dim
+        self.patch_size = patch_size
+        self.sample_rate = sample_rate
 
         self.patch_len = self.patch_size * self.hop_length
         if self.chunk_samples % self.hop_length != 0:
@@ -81,7 +81,7 @@ class AudioVAEEncoder:
 
     @property
     def cache_shapes(self) -> List[Tuple[int, ...]]:
-        return list(self._cache_shapes)
+        return self._cache_shapes
 
     def encode_chunk(self, audio_chunk: np.ndarray) -> np.ndarray:
         """Encode one fixed-size audio chunk, advancing the cache.
@@ -92,10 +92,6 @@ class AudioVAEEncoder:
         Returns:
             Latent frames of shape ``(1, latent_dim, frames_per_chunk)``.
         """
-        if audio_chunk.ndim != 1 or audio_chunk.shape[0] != self.chunk_samples:
-            raise ValueError(
-                f"expected audio of shape ({self.chunk_samples},), got {audio_chunk.shape}"
-            )
         inputs = {
             "audio": np.ascontiguousarray(
                 audio_chunk.reshape(1, 1, self.chunk_samples), dtype=np.float32
@@ -107,7 +103,7 @@ class AudioVAEEncoder:
         result = self.model.predict(inputs)
 
         self._caches = [
-            np.ascontiguousarray(result[f"new_cache_{i}"], dtype=np.float32)
+            result[f"new_cache_{i}"]
             for i in range(len(self._caches))
         ]
         return result["mu"]
