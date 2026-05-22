@@ -18,6 +18,7 @@ __all__ = [
     "AudioVAEEncoder",
     "FeatEncoder",
     "VoxCPM2Generator",
+    "load_embed_tokens",
     "load_embed_tokens_from_safetensors",
     "CoreMLMiniCPMLM",
     "CoreMLUnifiedCFM",

@@ -203,11 +203,9 @@ Voice caches use feature-encoder outputs, not full VAE encoder latents:
 - `name.prompt.decode_context.npy`: optional tail prompt VAE patches used to
   warm the streaming VAE decoder for high-similarity audio continuity
 
-Included voices may also ship LM prefix KV caches as
-`caches/name.lm_prefix.npz`. When a matching cache is present, preset
-reference-only requests can restore the base/residual LM prefix on the first
-request. Missing or custom voices build a local copy under `--cache-dir` on
-first use.
+Included voices may also ship LM prefix KV caches as `caches/name.lm_prefix.npz`.
+Matching caches restore the base/residual LM prefix on the first request. Missing
+or custom voices build a local copy under `--cache-dir` on first use.
 
 Old VAE-latent voice caches are not migrated at startup. A valid cache file is
 `(T, hidden_size)` feature-encoder output; if an older cache shape is present,

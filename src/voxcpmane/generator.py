@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import hashlib
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -17,7 +16,6 @@ from safetensors import safe_open
 
 from ._coreml_utils import (
     get_feature_info,
-    is_compiled_model_path,
     load_coreml_model,
     resolve_model_path,
 )
@@ -378,18 +376,6 @@ class VoxCPM2Generator:
             flush=True,
         )
 
-    def lm_prefix_cache_fingerprint(self) -> str:
-        """Return a stable key for LM prefix caches tied to active LM packages."""
-        payload = {
-            "version": 1,
-            "base_lm": self.base_lm.fingerprint(),
-            "residual_lm": self.residual_lm.fingerprint(),
-            "base_prefill_chunk_size": self._base_lm_prefill_chunk_size,
-            "residual_prefill_chunk_size": self._residual_lm_prefill_chunk_size,
-        }
-        raw = json.dumps(payload, sort_keys=True).encode("utf-8")
-        return hashlib.sha1(raw).hexdigest()[:16]
-
     @staticmethod
     def _resolve_prefill_chunk_size(lm: object, preferred: int | None) -> int | None:
         if preferred is None:
@@ -560,6 +546,86 @@ class VoxCPM2Generator:
         )
         return out["dit_hidden"].astype(np.float32), out["stop_flag"].astype(np.float32)
 
+    def _audio_feature_from_source(
+        self,
+        *,
+        feature: np.ndarray | None,
+        wav_path: str,
+        embed: np.ndarray | None,
+        padding_mode: str,
+    ) -> np.ndarray:
+        if feature is not None:
+            return np.asarray(feature, dtype=np.float32)
+        if wav_path:
+            return self.vae_encoder.encode_wav(wav_path, padding_mode=padding_mode)
+        if embed is not None:
+            return np.zeros(
+                (int(np.asarray(embed).shape[0]), self.patch_size, self.latent_dim),
+                dtype=np.float32,
+            )
+        return np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
+
+    def _validate_audio_feature(self, name: str, feat: np.ndarray) -> None:
+        expected = (self.patch_size, self.latent_dim)
+        if feat.ndim != 3 or feat.shape[1:] != expected:
+            raise ValueError(
+                f"{name} must have shape (T, {expected[0]}, {expected[1]}), "
+                f"got {feat.shape}"
+            )
+
+    def _embed_cache_or_none(
+        self,
+        name: str,
+        embed: np.ndarray | None,
+        feat: np.ndarray,
+    ) -> np.ndarray | None:
+        if embed is None:
+            return None
+        embed = np.asarray(embed, dtype=np.float32)
+        expected = (feat.shape[0], self.hidden_size)
+        if embed.shape != expected:
+            raise ValueError(f"{name} must have shape {expected}, got {embed.shape}")
+        return embed
+
+    def _coerce_prefix_feat_cond(
+        self, value: np.ndarray | None
+    ) -> np.ndarray | None:
+        if value is None:
+            return None
+        cond = np.asarray(value, dtype=np.float32)
+        if cond.shape == (self.patch_size, self.latent_dim):
+            return cond.T.reshape(1, self.latent_dim, self.patch_size)
+        if cond.shape == (self.latent_dim, self.patch_size):
+            return cond.reshape(1, self.latent_dim, self.patch_size)
+        if cond.shape == (1, self.latent_dim, self.patch_size):
+            return cond
+        raise ValueError(
+            "prompt_prefix_feat_cond must have shape "
+            f"({self.patch_size}, {self.latent_dim}), "
+            f"({self.latent_dim}, {self.patch_size}), or "
+            f"(1, {self.latent_dim}, {self.patch_size}); got {cond.shape}"
+        )
+
+    def _coerce_decode_context(self, value: np.ndarray | None) -> np.ndarray | None:
+        if value is None:
+            return None
+        context = np.asarray(value, dtype=np.float32)
+        if context.ndim != 3:
+            raise ValueError(
+                "prompt_decode_context must have shape "
+                f"(N, {self.patch_size}, {self.latent_dim}) or "
+                f"(N, {self.latent_dim}, {self.patch_size}); got {context.shape}"
+            )
+        if context.shape[1:] == (self.latent_dim, self.patch_size):
+            return np.transpose(context, (0, 2, 1))
+        if context.shape[1:] == (self.patch_size, self.latent_dim):
+            return context
+        raise ValueError(
+            "prompt_decode_context must have shape "
+            f"(N, {self.patch_size}, {self.latent_dim}) or "
+            f"(N, {self.latent_dim}, {self.patch_size}); got {context.shape}"
+        )
+
     def _prefill(
         self,
         target_text: str,
@@ -612,117 +678,30 @@ class VoxCPM2Generator:
         text_length = len(text_token)
         mark_prefill_stage("text_tokens")
 
-        if prompt_audio_feat is not None:
-            prompt_feat = np.asarray(prompt_audio_feat, dtype=np.float32)
-        elif prompt_wav_path:
-            prompt_feat = self.vae_encoder.encode_wav(
-                prompt_wav_path, padding_mode="left"
-            )
-        elif prompt_audio_embed is not None:
-            prompt_embed_len = int(np.asarray(prompt_audio_embed).shape[0])
-            prompt_feat = np.zeros(
-                (prompt_embed_len, self.patch_size, self.latent_dim),
-                dtype=np.float32,
-            )
-        else:
-            prompt_feat = np.empty(
-                (0, self.patch_size, self.latent_dim), dtype=np.float32
-            )
-
-        if reference_audio_feat is not None:
-            ref_feat = np.asarray(reference_audio_feat, dtype=np.float32)
-        elif reference_wav_path:
-            ref_feat = self.vae_encoder.encode_wav(
-                reference_wav_path, padding_mode="right"
-            )
-        elif reference_audio_embed is not None:
-            reference_embed_len = int(np.asarray(reference_audio_embed).shape[0])
-            ref_feat = np.zeros(
-                (reference_embed_len, self.patch_size, self.latent_dim),
-                dtype=np.float32,
-            )
-        else:
-            ref_feat = np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
-
-        for name, feat in (
-            ("prompt_audio_feat", prompt_feat),
-            ("reference_audio_feat", ref_feat),
-        ):
-            if feat.ndim != 3 or feat.shape[1:] != (self.patch_size, self.latent_dim):
-                raise ValueError(
-                    f"{name} must have shape (T, {self.patch_size}, {self.latent_dim}), "
-                    f"got {feat.shape}"
-                )
-
-        prompt_embed_cache = (
-            np.asarray(prompt_audio_embed, dtype=np.float32)
-            if prompt_audio_embed is not None
-            else None
+        prompt_feat = self._audio_feature_from_source(
+            feature=prompt_audio_feat,
+            wav_path=prompt_wav_path,
+            embed=prompt_audio_embed,
+            padding_mode="left",
         )
-        reference_embed_cache = (
-            np.asarray(reference_audio_embed, dtype=np.float32)
-            if reference_audio_embed is not None
-            else None
+        ref_feat = self._audio_feature_from_source(
+            feature=reference_audio_feat,
+            wav_path=reference_wav_path,
+            embed=reference_audio_embed,
+            padding_mode="right",
         )
-        prefix_feat_cond_override = (
-            np.asarray(prompt_prefix_feat_cond, dtype=np.float32)
-            if prompt_prefix_feat_cond is not None
-            else None
+        self._validate_audio_feature("prompt_audio_feat", prompt_feat)
+        self._validate_audio_feature("reference_audio_feat", ref_feat)
+        prompt_embed_cache = self._embed_cache_or_none(
+            "prompt_audio_embed", prompt_audio_embed, prompt_feat
         )
-        decode_context = (
-            np.asarray(prompt_decode_context, dtype=np.float32)
-            if prompt_decode_context is not None
-            else None
+        reference_embed_cache = self._embed_cache_or_none(
+            "reference_audio_embed", reference_audio_embed, ref_feat
         )
-        for name, embed, feat in (
-            ("prompt_audio_embed", prompt_embed_cache, prompt_feat),
-            ("reference_audio_embed", reference_embed_cache, ref_feat),
-        ):
-            if embed is None:
-                continue
-            expected = (feat.shape[0], self.hidden_size)
-            if embed.shape != expected:
-                raise ValueError(
-                    f"{name} must have shape {expected}, got {embed.shape}"
-                )
-        if prefix_feat_cond_override is not None:
-            if prefix_feat_cond_override.shape == (self.patch_size, self.latent_dim):
-                prefix_feat_cond_override = prefix_feat_cond_override.T.reshape(
-                    1, self.latent_dim, self.patch_size
-                )
-            elif prefix_feat_cond_override.shape == (self.latent_dim, self.patch_size):
-                prefix_feat_cond_override = prefix_feat_cond_override.reshape(
-                    1, self.latent_dim, self.patch_size
-                )
-            elif prefix_feat_cond_override.shape != (
-                1,
-                self.latent_dim,
-                self.patch_size,
-            ):
-                raise ValueError(
-                    "prompt_prefix_feat_cond must have shape "
-                    f"({self.patch_size}, {self.latent_dim}), "
-                    f"({self.latent_dim}, {self.patch_size}), or "
-                    f"(1, {self.latent_dim}, {self.patch_size}); "
-                    f"got {prefix_feat_cond_override.shape}"
-                )
-        if decode_context is not None:
-            if decode_context.ndim != 3:
-                raise ValueError(
-                    "prompt_decode_context must have shape "
-                    f"(N, {self.patch_size}, {self.latent_dim}) or "
-                    f"(N, {self.latent_dim}, {self.patch_size}); "
-                    f"got {decode_context.shape}"
-                )
-            if decode_context.shape[1:] == (self.latent_dim, self.patch_size):
-                decode_context = np.transpose(decode_context, (0, 2, 1))
-            elif decode_context.shape[1:] != (self.patch_size, self.latent_dim):
-                raise ValueError(
-                    "prompt_decode_context must have shape "
-                    f"(N, {self.patch_size}, {self.latent_dim}) or "
-                    f"(N, {self.latent_dim}, {self.patch_size}); "
-                    f"got {decode_context.shape}"
-                )
+        prefix_feat_cond_override = self._coerce_prefix_feat_cond(
+            prompt_prefix_feat_cond
+        )
+        decode_context = self._coerce_decode_context(prompt_decode_context)
         mark_prefill_stage("audio_features")
 
         segments = []
@@ -931,6 +910,49 @@ class VoxCPM2Generator:
             chunk = patch.T.reshape(1, self.latent_dim, self.patch_size)
             self.vae_decoder.decode_chunk(chunk)
 
+    def _lm_snapshot_shapes(self, lm: object) -> dict[str, tuple[int, ...]]:
+        if getattr(lm, "is_chain", False):
+            shapes = {}
+            for idx, submodel in enumerate(getattr(lm, "submodels")):
+                for name, shape in self._lm_snapshot_shapes(submodel).items():
+                    shapes[f"part_{idx}:{name}"] = shape
+            return shapes
+        return {
+            str(name): tuple(shape)
+            for name, shape in getattr(lm, "state_shapes", [])
+        }
+
+    def _validate_lm_snapshot(
+        self,
+        lm: object,
+        snapshot: dict[str, np.ndarray],
+        *,
+        label: str,
+        prefix_length: int,
+    ) -> None:
+        expected = self._lm_snapshot_shapes(lm)
+        if not expected:
+            raise ValueError(f"{label} LM exposes no state shapes")
+        missing = sorted(set(expected) - set(snapshot))
+        extra = sorted(set(snapshot) - set(expected))
+        if missing or extra:
+            raise ValueError(
+                f"{label} LM snapshot keys do not match current model; "
+                f"missing={missing[:4]} extra={extra[:4]}"
+            )
+        for name, value in snapshot.items():
+            shape = expected[name]
+            arr = np.asarray(value)
+            if len(shape) >= 3 and arr.ndim == len(shape) and shape[2] >= prefix_length:
+                expected_shape = shape[:2] + (int(prefix_length),) + shape[3:]
+            else:
+                expected_shape = shape
+            if tuple(arr.shape) != tuple(expected_shape):
+                raise ValueError(
+                    f"{label} LM state {name!r} has shape {arr.shape}; "
+                    f"expected {expected_shape}"
+                )
+
     def _save_lm_prefix_cache(self, cache_path: Path, prefix_length: int) -> None:
         """Save base/residual LM KV prefix slices as float16."""
         try:
@@ -976,6 +998,18 @@ class VoxCPM2Generator:
                     elif key.startswith("residual:"):
                         residual_snapshot[key[9:]] = data[key]
 
+                self._validate_lm_snapshot(
+                    self.base_lm,
+                    base_snapshot,
+                    label="base",
+                    prefix_length=prefix_length,
+                )
+                self._validate_lm_snapshot(
+                    self.residual_lm,
+                    residual_snapshot,
+                    label="residual",
+                    prefix_length=prefix_length,
+                )
                 self.base_lm.restore_state_prefix(base_snapshot, prefix_length)
                 self.residual_lm.restore_state_prefix(residual_snapshot, prefix_length)
             return True
@@ -1140,54 +1174,28 @@ class VoxCPM2Generator:
         seed: int | None = None,
     ) -> np.ndarray:
         """Generate audio from text plus optional reference voice."""
-        rng = np.random.default_rng(seed)
-
-        state = self._prefill(
-            target_text=target_text,
-            prompt_text=prompt_text,
-            prompt_wav_path=prompt_wav_path,
-            reference_wav_path=reference_wav_path,
-            prompt_audio_feat=prompt_audio_feat,
-            reference_audio_feat=reference_audio_feat,
-            prompt_audio_embed=prompt_audio_embed,
-            reference_audio_embed=reference_audio_embed,
-            prompt_prefix_feat_cond=prompt_prefix_feat_cond,
-            prompt_decode_context=prompt_decode_context,
-            lm_prefix_cache_path=lm_prefix_cache_path,
-            lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
-        )
-        max_len = self._limit_max_len_to_cache(max_len, state["prefill_tokens"])
-        self._swap_to_decode()
-
-        pred_feat_seq = []
-        try:
-            for pred_feat in self._ar_loop(
-                state,
+        chunks = list(
+            self.generate_streaming(
+                target_text=target_text,
+                prompt_text=prompt_text,
+                prompt_wav_path=prompt_wav_path,
+                reference_wav_path=reference_wav_path,
+                prompt_audio_feat=prompt_audio_feat,
+                reference_audio_feat=reference_audio_feat,
+                prompt_audio_embed=prompt_audio_embed,
+                reference_audio_embed=reference_audio_embed,
+                prompt_prefix_feat_cond=prompt_prefix_feat_cond,
+                prompt_decode_context=prompt_decode_context,
+                lm_prefix_cache_path=lm_prefix_cache_path,
+                lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
                 max_len=max_len,
                 min_len=min_len,
                 inference_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
-                rng=rng,
-            ):
-                pred_feat_seq.append(pred_feat)
-        finally:
-            self._swap_to_idle()
-
-        all_feats = np.concatenate(pred_feat_seq, axis=-1)
-        latent = all_feats[0]
-
-        self._warm_vae_decoder(state.get("prompt_decode_context"))
-        upsample = self.vae_decode_chunk_size
-        total_P = latent.shape[-1]
-        audio_parts = []
-
-        for start in range(0, total_P, self.patch_size):
-            chunk = latent[:, start : start + self.patch_size].reshape(
-                1, self.latent_dim, self.patch_size
+                seed=seed,
             )
-            audio_parts.append(self.vae_decoder.decode_chunk(chunk).reshape(-1))
-
-        return np.concatenate(audio_parts)[: total_P * upsample]
+        )
+        return np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float32)
 
     def generate_streaming(
         self,
@@ -1322,6 +1330,9 @@ class VoxCPM2Generator:
                 yield audio_chunk
         except GeneratorExit:
             final_status = "stopped"
+        except Exception:
+            final_status = "failed"
+            raise
         finally:
             if metrics_callback is not None:
                 metrics_callback(

@@ -332,32 +332,6 @@ class CoreMLMiniCPMLM:
             self.state.write_state(name, full)
         self.current_position = position
 
-    def fingerprint(self) -> list[str]:
-        """Return stable ID parameters for caching."""
-        def _model_cache_id(path: Path | None) -> str:
-            if path is None:
-                return "<unknown>"
-            path = Path(path)
-            name = path.name
-            for suffix in (".mlmodelc", ".mlpackage"):
-                if name.endswith(suffix):
-                    return name[: -len(suffix)]
-            return path.stem
-
-        if self.is_chain:
-            entries = []
-            for idx, submodel in enumerate(self.submodels):
-                entries.extend(f"{idx}:{item}" for item in submodel.fingerprint())
-            return entries
-
-        chunk_sizes = sorted(self._function_names_by_chunk_size)
-        return [
-            _model_cache_id(self.model_path),
-            f"cache_length={self.cache_length}",
-            "chunk_sizes=" + ",".join(str(size) for size in chunk_sizes),
-            "states=" + ";".join(f"{name}:{tuple(shape)}" for name, shape in self.state_shapes),
-        ]
-
     def forward(
         self,
         inputs_embeds: Any,
@@ -522,88 +496,71 @@ class CoreMLMiniCPMLM:
             out = self._from_nchw(out, original_rank)
             return restore(out)
 
+    def _record_multifunction_function(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        seed_shape: tuple[int, ...] | None,
+    ) -> None:
+        if not name.startswith("length_"):
+            return
+        try:
+            chunk_size = int(name.removeprefix("length_"))
+        except ValueError:
+            return
+        if chunk_size in self._models_by_chunk_size:
+            return
+        expected = (self.batch_size, self.input_channels, self.spatial_dim, chunk_size)
+        if tuple(shape) != expected:
+            raise ValueError(
+                f"function {name!r} has incompatible inputs_embeds shape {shape}; "
+                f"expected {expected}"
+            )
+        if seed_shape is not None and tuple(seed_shape) != (chunk_size,):
+            raise ValueError(
+                f"function {name!r} has incompatible position_index_seed "
+                f"shape {seed_shape}, expected {(chunk_size,)}"
+            )
+        self._function_names_by_chunk_size[chunk_size] = name
+
     def _discover_multifunction_functions(self, spec: Any) -> None:
         """Record ``length_<N>`` functions from a multifunction package."""
-        functions = spec.description.functions
-        for function in functions:
-            name = function.name
-            if not name.startswith("length_"):
+        for function in spec.description.functions:
+            x_desc = next((i for i in function.input if i.name == "inputs_embeds"), None)
+            if x_desc is None:
                 continue
-            try:
-                chunk_size = int(name.removeprefix("length_"))
-            except ValueError:
-                continue
-            if chunk_size in self._models_by_chunk_size:
-                continue
-            x_desc = next(i for i in function.input if i.name == "inputs_embeds")
             seed_desc = next(
                 (i for i in function.input if i.name == "position_index_seed"),
                 None,
             )
-            shape = tuple(int(d) for d in x_desc.type.multiArrayType.shape)
-            if (
-                len(shape) != 4
-                or shape[0] != self.batch_size
-                or shape[1] != self.input_channels
-                or shape[2] != self.spatial_dim
-                or shape[3] != chunk_size
-            ):
-                raise ValueError(
-                    f"function {name!r} has incompatible inputs_embeds shape {shape}"
-                )
-            seed_shape = (
-                tuple(int(d) for d in seed_desc.type.multiArrayType.shape)
-                if seed_desc is not None
-                else None
+            self._record_multifunction_function(
+                function.name,
+                tuple(int(d) for d in x_desc.type.multiArrayType.shape),
+                (
+                    tuple(int(d) for d in seed_desc.type.multiArrayType.shape)
+                    if seed_desc is not None
+                    else None
+                ),
             )
-            if seed_shape is not None and seed_shape != (chunk_size,):
-                raise ValueError(
-                    f"function {name!r} has incompatible position_index_seed "
-                    f"shape {seed_shape}, expected {(chunk_size,)}"
-                )
-            self._function_names_by_chunk_size[chunk_size] = name
 
     def _discover_multifunction_functions_from_metadata(self, metadata: dict) -> None:
         for function in metadata.get("functions", []):
             name = function.get("name", "")
-            if not name.startswith("length_"):
-                continue
-            try:
-                chunk_size = int(name.removeprefix("length_"))
-            except ValueError:
-                continue
-            if chunk_size in self._models_by_chunk_size:
-                continue
             input_schema = function.get("inputSchema", [])
             x_desc = next(
                 (i for i in input_schema if i.get("name") == "inputs_embeds"), None
             )
             if x_desc is None:
                 continue
-            shape = parse_shape_text(x_desc["shape"])
-            if (
-                len(shape) != 4
-                or shape[0] != self.batch_size
-                or shape[1] != self.input_channels
-                or shape[2] != self.spatial_dim
-                or shape[3] != chunk_size
-            ):
-                raise ValueError(
-                    f"function {name!r} has incompatible inputs_embeds shape {shape}"
-                )
             seed_desc = next(
                 (i for i in input_schema if i.get("name") == "position_index_seed"),
                 None,
             )
-            seed_shape = (
-                parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
+            self._record_multifunction_function(
+                name,
+                parse_shape_text(x_desc["shape"]),
+                parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None,
             )
-            if seed_shape is not None and seed_shape != (chunk_size,):
-                raise ValueError(
-                    f"function {name!r} has incompatible position_index_seed "
-                    f"shape {seed_shape}, expected {(chunk_size,)}"
-                )
-            self._function_names_by_chunk_size[chunk_size] = name
 
     def _load_multifunction_handles(self) -> None:
         """Eagerly load all discovered ``length_<N>`` functions."""
@@ -878,4 +835,3 @@ class CoreMLMiniCPMLM:
         if original_rank == 4:
             return np.ascontiguousarray(x)
         raise ValueError(f"unsupported original rank {original_rank}")
-
