@@ -10,6 +10,10 @@ VoxCPMANE2 is the VoxCPM2 version of [VoxCPMANE](../VoxCPMANE). It provides a
 pure numpy/CoreML runtime and FastAPI HTTP server for running VoxCPM2 TTS on
 Apple Silicon with Apple Neural Engine acceleration.
 
+The package includes a browser-based playground at `http://localhost:8000/` for
+trying voices, streaming, playback, and custom voice creation without writing
+client code.
+
 CoreML model assets are downloaded from
 [seba/VoxCPM2ANE-Preview](https://huggingface.co/seba/VoxCPM2ANE-Preview)
 by default.
@@ -18,7 +22,7 @@ by default.
 - OpenAI-compatible `/v1/audio/speech` endpoint
 - Streaming audio generation
 - Server-side playback
-- Web playground at `/`
+- Web playground for generation, voice management, streaming, and playback
 - Custom cached voices
 
 ## Requirements
@@ -52,8 +56,17 @@ this directory.
 voxcpmane2-server
 ```
 
-The server starts on `http://localhost:8000` by default. Open the root URL for
-the web playground.
+The server starts on `http://localhost:8000` by default. Open
+`http://localhost:8000/` to use the included web playground. It exposes the main
+workflows from the browser: generate speech, stream audio, play audio on the
+server, create custom voices, and inspect available voices.
+
+## Web Playground
+
+Most users can start with the playground instead of writing API requests. After
+starting the server, open `http://localhost:8000/` to generate speech with the
+included voices, test streaming behavior, use server-side playback, create
+custom voices, and switch between voice modes from the browser.
 
 Common options:
 
@@ -61,8 +74,6 @@ Common options:
 voxcpmane2-server \
   --host 0.0.0.0 \
   --port 8000 \
-  --repo-id seba/VoxCPM2ANE-Preview \
-  --cache-dir ~/.cache/ane_tts
 ```
 
 If `--model-dir` is omitted, the server downloads the CoreML model directory
@@ -106,29 +117,6 @@ voxcpmane2-server --lm-prefill-chunk-size 128 --lm-mode single-length
 
 ## Model Path Options
 
-You can point the server at a complete model directory:
-
-```bash
-voxcpmane2-server --model-dir /path/to/VoxCPM2-ANE
-voxcpmane2-server --repo-id seba/VoxCPM2ANE-Preview
-```
-
-Or override individual CoreML packages:
-
-```bash
-voxcpmane2-server \
-  --base-lm-path /path/to/base_lm_multifunction.mlpackage \
-  --residual-lm-path /path/to/residual_lm_fused_multifunction.mlpackage \
-  --locdit-path /path/to/locdit_p4_c4.mlpackage \
-  --vae-encoder-path /path/to/audio_vae_encoder.mlpackage \
-  --feat-encoder-path /path/to/feat_encoder.mlpackage \
-  --vae-decoder-path /path/to/audio_vae_decoder_lf4.mlpackage \
-  --fsq-path /path/to/fsq_s4.mlpackage \
-  --projections-path /path/to/projections.mlpackage
-```
-
-Use `--compile-and-save` to compile `.mlpackage` directories into sibling
-`.mlmodelc` directories when compiled versions are missing.
 
 When running with local package paths, included voices are loaded from
 `--included-voice-cache-dir` if provided, then from `<model-dir>/caches` if it
@@ -189,7 +177,7 @@ The stream response is raw PCM16 at the sample rate exposed in the
 
 ### Other Endpoints
 
-- `GET /`: web playground
+- `GET /`: browser-based web playground for generation and voice management
 - `GET /health`: server status
 - `GET /voices`: available cached voices
 - `POST /v1/voices`: create a cached custom voice
