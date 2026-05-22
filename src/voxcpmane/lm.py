@@ -54,7 +54,7 @@ class CoreMLMiniCPMLM:
 
     def __init__(
         self,
-        model_path: Path,
+        model_path: Path | Sequence[Path],
         *,
         compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
         embed_tokens: Optional[Any] = None,
@@ -66,8 +66,63 @@ class CoreMLMiniCPMLM:
         keep_default_function_loaded: bool = False,
         restrict_to_preload: bool = False,
     ):
-        self.model_path = model_path
         self.compute_units = compute_units
+        self.embed_tokens = embed_tokens
+        self.kv_cache = _RuntimeKVCache(self)
+        self.current_position = 0
+
+        # Support sequence of paths/models (chained model)
+        if isinstance(model_path, (list, tuple, Sequence)) and not isinstance(
+            model_path, (str, Path)
+        ):
+            self.is_chain = True
+            model_paths = list(model_path)
+            if len(model_paths) < 1:
+                raise ValueError("at least one model path required")
+            self.submodels = [
+                CoreMLMiniCPMLM(
+                    p,
+                    compute_units=compute_units,
+                    embed_tokens=embed_tokens,
+                    eager_load_functions=eager_load_functions,
+                    max_function_handles=max_function_handles,
+                    unload_inactive_functions=unload_inactive_functions,
+                    idle_prefill_chunk_size=idle_prefill_chunk_size,
+                    preload_chunk_sizes=preload_chunk_sizes,
+                    keep_default_function_loaded=keep_default_function_loaded,
+                    restrict_to_preload=restrict_to_preload,
+                )
+                for p in model_paths
+            ]
+            
+            shapes = [
+                (m.batch_size, m.input_channels, m.spatial_dim, m.chunk_size)
+                for m in self.submodels
+            ]
+            if not all(
+                s[0] == shapes[0][0] and s[2] == shapes[0][2] and s[3] == shapes[0][3]
+                for s in shapes
+            ):
+                raise ValueError(f"submodel input shapes differ in B/H/S: {shapes}")
+            chunk_sets = [set(m._function_names_by_chunk_size) for m in self.submodels]
+            if not all(chunks == chunk_sets[0] for chunks in chunk_sets):
+                raise ValueError(f"submodel multifunction lengths differ: {chunk_sets}")
+
+            self.batch_size = shapes[0][0]
+            self.input_channels = shapes[0][1]
+            self.spatial_dim = shapes[0][2]
+            self.chunk_size = shapes[0][3]
+            self.cache_length = min(
+                (m.cache_length for m in self.submodels if m.cache_length is not None),
+                default=None,
+            )
+            self._function_names_by_chunk_size = dict(
+                self.submodels[0]._function_names_by_chunk_size
+            )
+            return
+
+        self.is_chain = False
+        self.model_path = model_path
         spec = None
         metadata = None
         if is_compiled_model_path(self.model_path):
@@ -79,9 +134,6 @@ class CoreMLMiniCPMLM:
             default_function_name = spec.description.defaultFunctionName or "main"
         self.model = None
         self.state: Optional[ct.models.model.MLState] = None
-        self.current_position = 0
-        self.embed_tokens = embed_tokens
-        self.kv_cache = _RuntimeKVCache(self)
         self.eager_load_functions = bool(eager_load_functions)
         self.max_function_handles = int(max_function_handles)
         self.unload_inactive_functions = bool(unload_inactive_functions)
@@ -165,7 +217,6 @@ class CoreMLMiniCPMLM:
         else:
             self._discover_multifunction_functions(spec)
         if preload_chunk_sizes:
-            # Only load the exact requested functions — skip default entirely.
             self.model = None
             self.max_function_handles = max(
                 self.max_function_handles, len(preload_chunk_sizes)
@@ -219,12 +270,25 @@ class CoreMLMiniCPMLM:
         return self.forward(*args, **kwargs)
 
     def reset(self) -> None:
+        if self.is_chain:
+            for submodel in self.submodels:
+                submodel.reset()
+            self.current_position = 0
+            return
         model = self._active_or_default_model()
         self.state = model.make_state()
         self.current_position = 0
 
-    def snapshot_state_prefix(self, prefix_length: int) -> dict:
-        """Read populated KV prefix state as float16 arrays."""
+    def snapshot_state_prefix(self, prefix_length: int) -> dict[str, np.ndarray]:
+        """Read populated KV prefix state as float16 arrays in a flat dict."""
+        if self.is_chain:
+            flat = {}
+            for idx, submodel in enumerate(self.submodels):
+                sub_snapshot = submodel.snapshot_state_prefix(prefix_length)
+                for name, arr in sub_snapshot.items():
+                    flat[f"part_{idx}:{name}"] = arr
+            return flat
+
         if self.state is None:
             raise RuntimeError("cannot snapshot LM state before it has been created")
         prefix_length = int(prefix_length)
@@ -236,18 +300,24 @@ class CoreMLMiniCPMLM:
                 index[2] = slice(0, prefix_length)
                 value = value[tuple(index)]
             arrays[name] = value.astype(np.float16, copy=False)
-        return {
-            "kind": "CoreMLMiniCPMLM",
-            "position": prefix_length,
-            "arrays": arrays,
-        }
+        return arrays
 
-    def restore_state_prefix(self, snapshot: dict) -> None:
+    def restore_state_prefix(self, snapshot: dict[str, np.ndarray], position: int) -> None:
         """Restore a float16 KV prefix snapshot into a fresh CoreML MLState."""
-        position = int(snapshot["position"])
+        if self.is_chain:
+            for idx, submodel in enumerate(self.submodels):
+                sub_snapshot = {
+                    name.split(":", 1)[1]: arr
+                    for name, arr in snapshot.items()
+                    if name.startswith(f"part_{idx}:")
+                }
+                submodel.restore_state_prefix(sub_snapshot, position)
+            self.current_position = position
+            return
+
         model = self._active_or_default_model()
         self.state = model.make_state()
-        for name, cached in snapshot["arrays"].items():
+        for name, cached in snapshot.items():
             shape = self.state_shape_by_name.get(name)
             if shape is None:
                 raise ValueError(f"state {name!r} is not present in this LM")
@@ -262,6 +332,32 @@ class CoreMLMiniCPMLM:
             self.state.write_state(name, full)
         self.current_position = position
 
+    def fingerprint(self) -> list[str]:
+        """Return stable ID parameters for caching."""
+        def _model_cache_id(path: Path | None) -> str:
+            if path is None:
+                return "<unknown>"
+            path = Path(path)
+            name = path.name
+            for suffix in (".mlmodelc", ".mlpackage"):
+                if name.endswith(suffix):
+                    return name[: -len(suffix)]
+            return path.stem
+
+        if self.is_chain:
+            entries = []
+            for idx, submodel in enumerate(self.submodels):
+                entries.extend(f"{idx}:{item}" for item in submodel.fingerprint())
+            return entries
+
+        chunk_sizes = sorted(self._function_names_by_chunk_size)
+        return [
+            _model_cache_id(self.model_path),
+            f"cache_length={self.cache_length}",
+            "chunk_sizes=" + ",".join(str(size) for size in chunk_sizes),
+            "states=" + ";".join(f"{name}:{tuple(shape)}" for name, shape in self.state_shapes),
+        ]
+
     def forward(
         self,
         inputs_embeds: Any,
@@ -273,6 +369,8 @@ class CoreMLMiniCPMLM:
     ) -> Tuple[Any, None]:
         """Run prefill over ``inputs_embeds`` and return ``(hidden, None)``."""
         _ = is_causal  # CoreML graph is always causal.
+        if self.is_chain and profile_prefix == "lm":
+            profile_prefix = "lm_chain"
         output = self._run(
             inputs_embeds,
             reset_state=reset_state,
@@ -291,6 +389,8 @@ class CoreMLMiniCPMLM:
     ) -> Any:
         """Run one decode step or a small padded decode chunk."""
         _ = position_id  # Position is tracked by ``current_position``.
+        if self.is_chain and profile_prefix == "lm":
+            profile_prefix = "lm_chain"
         return self._run(
             inputs_embeds,
             reset_state=False,
@@ -311,6 +411,55 @@ class CoreMLMiniCPMLM:
         profile_prefix: str = "lm",
         preferred_chunk_size: Optional[int] = None,
     ) -> Any:
+        if self.is_chain:
+            with self._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
+                arr, restore, original_rank = self._to_numpy(inputs_embeds)
+                x = self._to_nchw(arr)
+
+            if x.shape[0] != 1:
+                raise ValueError(f"CoreML LM chain supports B=1, got B={x.shape[0]}")
+            if x.shape[1] != self.input_channels:
+                raise ValueError(
+                    f"chain expects {self.input_channels} input channels, got {x.shape[1]}"
+                )
+
+            length = x.shape[-1]
+            chunks = []
+            offset = 0
+            while offset < length:
+                remaining = length - offset
+                chunk_size = self._select_chunk_size(
+                    remaining,
+                    preferred_chunk_size=preferred_chunk_size,
+                )
+                consumed = min(remaining, chunk_size)
+                with self._profile(
+                    profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"
+                ):
+                    chunk = np.ascontiguousarray(
+                        x[..., offset : offset + consumed],
+                        dtype=np.float32,
+                    )
+                    hidden = chunk
+                for idx, submodel in enumerate(self.submodels):
+                    hidden = submodel._run(
+                        hidden,
+                        reset_state=reset_state,
+                        profiler=profiler,
+                        profile_prefix=f"{profile_prefix}/part{idx}",
+                        preferred_chunk_size=chunk_size,
+                    )
+                reset_state = False
+                chunks.append(hidden)
+                self.current_position += consumed
+                offset += consumed
+
+            with self._profile(profiler, f"{profile_prefix}/concat_restore"):
+                out = np.concatenate(chunks, axis=-1)[..., :length]
+                out = self._from_nchw(out, original_rank)
+                return restore(out)
+
+        # Single model execution
         with self._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
             arr, restore, original_rank = self._to_numpy(inputs_embeds)
             x = self._to_nchw(arr)
@@ -465,8 +614,6 @@ class CoreMLMiniCPMLM:
         model = self._models_by_chunk_size.get(self.chunk_size)
         if model is not None:
             return model
-        # If native chunk_size was filtered out (single-length mode),
-        # return any currently loaded model or load the smallest available.
         if self._models_by_chunk_size:
             return next(iter(self._models_by_chunk_size.values()))
         cs = self.chunk_size
@@ -567,6 +714,14 @@ class CoreMLMiniCPMLM:
         )
 
     def drain_lifecycle_events(self) -> list[tuple[str, float]]:
+        if self.is_chain:
+            events: list[tuple[str, float]] = []
+            for idx, submodel in enumerate(self.submodels):
+                events.extend(
+                    (f"part{idx}/{name}", duration)
+                    for name, duration in submodel.drain_lifecycle_events()
+                )
+            return events
         events = self.lifecycle_events
         self.lifecycle_events = []
         return events
@@ -705,10 +860,8 @@ class CoreMLMiniCPMLM:
     @staticmethod
     def _to_nchw(x: np.ndarray) -> np.ndarray:
         if x.ndim == 2:
-            # (B, C) -> (B, C, 1, 1)
             return np.ascontiguousarray(x[:, :, None, None], dtype=np.float32)
         if x.ndim == 3:
-            # (B, T, C) -> (B, C, 1, T)
             return np.ascontiguousarray(
                 np.transpose(x, (0, 2, 1))[:, :, None, :], dtype=np.float32
             )
@@ -726,201 +879,3 @@ class CoreMLMiniCPMLM:
             return np.ascontiguousarray(x)
         raise ValueError(f"unsupported original rank {original_rank}")
 
-
-class CoreMLMiniCPMLMChain:
-    """Runtime wrapper that chains multiple MLState LM subpackages.
-
-    Each subpackage owns a contiguous slice of the LM's decoder layers
-    and its own KV MLState buffer sized to that slice. Forward flows
-    ``hidden_states`` through the chain: subpackage N's output is
-    subpackage N+1's input. All subpackages share the same
-    ``current_position`` so their causal masks and RoPE lookups align.
-
-    Splitting keeps each subpackage small enough to land on the ANE
-    (single-package weight budget ≈1 GB on current hardware).
-    """
-
-    def __init__(
-        self,
-        model_paths: Sequence[Path],
-        *,
-        compute_units: ct.ComputeUnit = ct.ComputeUnit.CPU_AND_NE,
-        embed_tokens: Optional[Any] = None,
-    ):
-        if len(model_paths) < 1:
-            raise ValueError("at least one model path required")
-        self.submodels: List[CoreMLMiniCPMLM] = [
-            CoreMLMiniCPMLM(p, compute_units=compute_units) for p in model_paths
-        ]
-        self.current_position = 0
-        self.embed_tokens = embed_tokens
-        self.kv_cache = _RuntimeKVCache(self)
-
-        shapes = [
-            (m.batch_size, m.input_channels, m.spatial_dim, m.chunk_size)
-            for m in self.submodels
-        ]
-        if not all(
-            s[0] == shapes[0][0] and s[2] == shapes[0][2] and s[3] == shapes[0][3]
-            for s in shapes
-        ):
-            raise ValueError(f"submodel input shapes differ in B/H/S: {shapes}")
-        chunk_sets = [set(m._function_names_by_chunk_size) for m in self.submodels]
-        if not all(chunks == chunk_sets[0] for chunks in chunk_sets):
-            raise ValueError(f"submodel multifunction lengths differ: {chunk_sets}")
-
-        self.batch_size = shapes[0][0]
-        self.input_channels = shapes[0][1]
-        self.spatial_dim = shapes[0][2]
-        self.chunk_size = shapes[0][3]
-        self.cache_length = min(
-            (m.cache_length for m in self.submodels if m.cache_length is not None),
-            default=None,
-        )
-        self._function_names_by_chunk_size = dict(
-            self.submodels[0]._function_names_by_chunk_size
-        )
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Tuple[Any, None]:
-        return self.forward(*args, **kwargs)
-
-    def reset(self) -> None:
-        for submodel in self.submodels:
-            submodel.reset()
-        self.current_position = 0
-
-    def snapshot_state_prefix(self, prefix_length: int) -> dict:
-        prefix_length = int(prefix_length)
-        return {
-            "kind": "CoreMLMiniCPMLMChain",
-            "position": prefix_length,
-            "submodels": [
-                submodel.snapshot_state_prefix(prefix_length)
-                for submodel in self.submodels
-            ],
-        }
-
-    def restore_state_prefix(self, snapshot: dict) -> None:
-        sub_snapshots = snapshot.get("submodels", [])
-        if len(sub_snapshots) != len(self.submodels):
-            raise ValueError(
-                f"LM chain snapshot has {len(sub_snapshots)} parts, "
-                f"expected {len(self.submodels)}"
-            )
-        for submodel, sub_snapshot in zip(self.submodels, sub_snapshots):
-            submodel.restore_state_prefix(sub_snapshot)
-        self.current_position = int(snapshot["position"])
-
-    def forward(
-        self,
-        inputs_embeds: Any,
-        is_causal: bool = True,
-        reset_state: bool = True,
-        profiler: Optional[Any] = None,
-        profile_prefix: str = "lm_chain",
-        preferred_chunk_size: Optional[int] = None,
-    ) -> Tuple[Any, None]:
-        _ = is_causal
-        return (
-            self._run(
-                inputs_embeds,
-                reset_state=reset_state,
-                profiler=profiler,
-                profile_prefix=profile_prefix,
-                preferred_chunk_size=preferred_chunk_size,
-            ),
-            None,
-        )
-
-    def forward_step(
-        self,
-        inputs_embeds: Any,
-        position_id: Any = None,
-        profiler: Optional[Any] = None,
-        profile_prefix: str = "lm_chain",
-    ) -> Any:
-        _ = position_id
-        return self._run(
-            inputs_embeds,
-            reset_state=False,
-            profiler=profiler,
-            profile_prefix=profile_prefix,
-        )
-
-    def _run(
-        self,
-        inputs_embeds: Any,
-        *,
-        reset_state: bool,
-        profiler: Optional[Any] = None,
-        profile_prefix: str = "lm_chain",
-        preferred_chunk_size: Optional[int] = None,
-    ) -> Any:
-        with CoreMLMiniCPMLM._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
-            arr, restore, original_rank = CoreMLMiniCPMLM._to_numpy(inputs_embeds)
-            x = CoreMLMiniCPMLM._to_nchw(arr)
-
-        if x.shape[0] != 1:
-            raise ValueError(f"CoreML LM chain supports B=1, got B={x.shape[0]}")
-        if x.shape[1] != self.input_channels:
-            raise ValueError(
-                f"chain expects {self.input_channels} input channels, got {x.shape[1]}"
-            )
-
-        length = x.shape[-1]
-        chunks = []
-        offset = 0
-        while offset < length:
-            remaining = length - offset
-            chunk_size = self._select_chunk_size(
-                remaining,
-                preferred_chunk_size=preferred_chunk_size,
-            )
-            consumed = min(remaining, chunk_size)
-            with CoreMLMiniCPMLM._profile(
-                profiler, f"{profile_prefix}/chunk_prepare_s{chunk_size}"
-            ):
-                chunk = np.ascontiguousarray(
-                    x[..., offset : offset + consumed],
-                    dtype=np.float32,
-                )
-                hidden = chunk
-            for idx, submodel in enumerate(self.submodels):
-                hidden = submodel._run(
-                    hidden,
-                    reset_state=reset_state,
-                    profiler=profiler,
-                    profile_prefix=f"{profile_prefix}/part{idx}",
-                    preferred_chunk_size=chunk_size,
-                )
-            reset_state = False
-            chunks.append(hidden)
-            self.current_position += consumed
-            offset += consumed
-
-        with CoreMLMiniCPMLM._profile(profiler, f"{profile_prefix}/concat_restore"):
-            out = np.concatenate(chunks, axis=-1)[..., :length]
-            out = CoreMLMiniCPMLM._from_nchw(out, original_rank)
-            return restore(out)
-
-    def _select_chunk_size(
-        self,
-        remaining: int,
-        *,
-        preferred_chunk_size: Optional[int] = None,
-    ) -> int:
-        return select_chunk_size(
-            remaining,
-            self._function_names_by_chunk_size,
-            self.chunk_size,
-            preferred_chunk_size=preferred_chunk_size,
-        )
-
-    def drain_lifecycle_events(self) -> list[tuple[str, float]]:
-        events: list[tuple[str, float]] = []
-        for idx, submodel in enumerate(self.submodels):
-            events.extend(
-                (f"part{idx}/{name}", duration)
-                for name, duration in submodel.drain_lifecycle_events()
-            )
-        return events

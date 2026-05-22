@@ -15,11 +15,16 @@ import numpy as np
 import soundfile as sf
 from safetensors import safe_open
 
-from ._coreml_utils import get_feature_info, is_compiled_model_path, load_coreml_model
+from ._coreml_utils import (
+    get_feature_info,
+    is_compiled_model_path,
+    load_coreml_model,
+    resolve_model_path,
+)
 from .audio_vae_decoder import AudioVAEDecoder
 from .audio_vae_encoder import AudioVAEEncoder
 from .feat_encoder import FeatEncoder
-from .lm import CoreMLMiniCPMLM, CoreMLMiniCPMLMChain
+from .lm import CoreMLMiniCPMLM
 from .locdit import CoreMLUnifiedCFM
 
 DEFAULT_EMBEDDING_KEYS = (
@@ -31,20 +36,6 @@ DEFAULT_EMBEDDING_KEYS = (
 )
 
 
-def _compiled_sibling_if_available(path: Path, *, use_compiled: bool = True) -> Path:
-    compiled = path.with_suffix(".mlmodelc")
-    if (
-        use_compiled
-        and compiled.exists()
-        and (compiled / "metadata.json").exists()
-        and (compiled / "model.mil").exists()
-    ):
-        return compiled
-    return path
-
-
-def _compiled_counterpart_in_dir(path: Path, compiled_dir: Path) -> Path:
-    return compiled_dir / path.with_suffix(".mlmodelc").name
 
 
 def _iter_safetensors_files(path: Path) -> Iterable[Path]:
@@ -250,25 +241,13 @@ class VoxCPM2Generator:
         self._decode_load_executor: ThreadPoolExecutor | None = None
         self._decode_load_future: Future | None = None
 
-        def _resolve_model_path(path: Path, *, use_compiled: bool) -> Path:
-            resolved = _compiled_sibling_if_available(path, use_compiled=use_compiled)
-            if is_compiled_model_path(resolved):
-                return resolved
-            if use_compiled and compiled_dir is not None:
-                fallback = _compiled_counterpart_in_dir(path, compiled_dir)
-                if (
-                    fallback.exists()
-                    and (fallback / "metadata.json").exists()
-                    and (fallback / "model.mil").exists()
-                ):
-                    return fallback
-            return path
-
         def _model_path(
             override: Path | None, filename: str, *, use_compiled: bool = True
         ) -> Path:
-            return _resolve_model_path(
-                override or mdir / filename, use_compiled=use_compiled
+            return resolve_model_path(
+                override or mdir / filename,
+                use_compiled=use_compiled,
+                compiled_dir=compiled_dir,
             )
 
         # Load CoreML models
@@ -288,8 +267,9 @@ class VoxCPM2Generator:
             compute_units=feat_compute_units,
         )
 
-        def _compiled_sibling(path: Path) -> Path:
-            return _resolve_model_path(path, use_compiled=use_compiled_lm)
+        _compiled_sibling = lambda p: resolve_model_path(
+            p, use_compiled=use_compiled_lm, compiled_dir=compiled_dir
+        )
 
         lm_kwargs = {
             "compute_units": lm_compute_units,
@@ -305,9 +285,9 @@ class VoxCPM2Generator:
             )
         elif base_lm_split_model_paths is not None:
             base_paths = [_compiled_sibling(p) for p in base_lm_split_model_paths]
-            self.base_lm = CoreMLMiniCPMLMChain(
+            self.base_lm = CoreMLMiniCPMLM(
                 base_paths,
-                compute_units=lm_compute_units,
+                **lm_kwargs,
             )
         elif base_lm_splits > 1:
             base_paths = [
@@ -317,9 +297,9 @@ class VoxCPM2Generator:
                 )
                 for i in range(base_lm_splits)
             ]
-            self.base_lm = CoreMLMiniCPMLMChain(
+            self.base_lm = CoreMLMiniCPMLM(
                 base_paths,
-                compute_units=lm_compute_units,
+                **lm_kwargs,
             )
         else:
             self.base_lm = CoreMLMiniCPMLM(
@@ -400,39 +380,10 @@ class VoxCPM2Generator:
 
     def lm_prefix_cache_fingerprint(self) -> str:
         """Return a stable key for LM prefix caches tied to active LM packages."""
-
-        def _model_cache_id(path: Path | None) -> str:
-            if path is None:
-                return "<unknown>"
-            path = Path(path)
-            name = path.name
-            for suffix in (".mlmodelc", ".mlpackage"):
-                if name.endswith(suffix):
-                    return name[: -len(suffix)]
-            return path.stem
-
-        def _lm_entries(lm: object) -> list[str]:
-            if hasattr(lm, "submodels"):
-                entries = []
-                for idx, submodel in enumerate(getattr(lm, "submodels")):
-                    entries.extend(f"{idx}:{item}" for item in _lm_entries(submodel))
-                return entries
-            path = getattr(lm, "model_path", None)
-            shapes = getattr(lm, "state_shapes", [])
-            cache_length = getattr(lm, "cache_length", None)
-            chunk_sizes = sorted(getattr(lm, "_function_names_by_chunk_size", {}))
-            return [
-                _model_cache_id(Path(path) if path is not None else None),
-                f"cache_length={cache_length}",
-                "chunk_sizes=" + ",".join(str(size) for size in chunk_sizes),
-                "states="
-                + ";".join(f"{name}:{tuple(shape)}" for name, shape in shapes),
-            ]
-
         payload = {
             "version": 1,
-            "base_lm": _lm_entries(self.base_lm),
-            "residual_lm": _lm_entries(self.residual_lm),
+            "base_lm": self.base_lm.fingerprint(),
+            "residual_lm": self.residual_lm.fingerprint(),
             "base_prefill_chunk_size": self._base_lm_prefill_chunk_size,
             "residual_prefill_chunk_size": self._residual_lm_prefill_chunk_size,
         }
@@ -774,73 +725,34 @@ class VoxCPM2Generator:
                 )
         mark_prefill_stage("audio_features")
 
-        text_pad_feat = np.zeros(
-            (text_length, self.patch_size, self.latent_dim), dtype=np.float32
-        )
-
-        lm_prefix_length = 0
+        segments = []
         if has_reference_audio:
-            ref_tokens, ref_feats, ref_text_mask, ref_feat_mask = self._make_ref_prefix(
-                ref_feat
-            )
+            ref_tokens, ref_feats, ref_text_mask, ref_feat_mask = self._make_ref_prefix(ref_feat)
             lm_prefix_length = len(ref_tokens)
-            if has_prompt_audio:
-                prompt_audio_length = prompt_feat.shape[0]
-                prompt_pad_token = np.zeros(prompt_audio_length, dtype=np.int32)
-                text_token = np.concatenate([ref_tokens, text_token, prompt_pad_token])
-                audio_feat = np.concatenate(
-                    [ref_feats, text_pad_feat, prompt_feat], axis=0
-                )
-                text_mask_1d = np.concatenate(
-                    [
-                        ref_text_mask,
-                        np.ones(text_length, dtype=np.float32),
-                        np.zeros(prompt_audio_length, dtype=np.float32),
-                    ]
-                )
-                feat_mask_1d = np.concatenate(
-                    [
-                        ref_feat_mask,
-                        np.zeros(text_length, dtype=np.float32),
-                        np.ones(prompt_audio_length, dtype=np.float32),
-                    ]
-                )
-            else:
-                text_token = np.concatenate([ref_tokens, text_token])
-                audio_feat = np.concatenate([ref_feats, text_pad_feat], axis=0)
-                text_mask_1d = np.concatenate(
-                    [
-                        ref_text_mask,
-                        np.ones(text_length, dtype=np.float32),
-                    ]
-                )
-                feat_mask_1d = np.concatenate(
-                    [
-                        ref_feat_mask,
-                        np.zeros(text_length, dtype=np.float32),
-                    ]
-                )
-        elif has_prompt_audio:
-            audio_length = prompt_feat.shape[0]
-            prompt_pad_token = np.zeros(audio_length, dtype=np.int32)
-            text_token = np.concatenate([text_token, prompt_pad_token])
-            audio_feat = np.concatenate([text_pad_feat, prompt_feat], axis=0)
-            text_mask_1d = np.concatenate(
-                [
-                    np.ones(text_length, dtype=np.float32),
-                    np.zeros(audio_length, dtype=np.float32),
-                ]
-            )
-            feat_mask_1d = np.concatenate(
-                [
-                    np.zeros(text_length, dtype=np.float32),
-                    np.ones(audio_length, dtype=np.float32),
-                ]
-            )
+            segments.append((ref_tokens, ref_feats, ref_text_mask, ref_feat_mask))
         else:
-            audio_feat = text_pad_feat
-            text_mask_1d = np.ones(text_length, dtype=np.float32)
-            feat_mask_1d = np.zeros(text_length, dtype=np.float32)
+            lm_prefix_length = 0
+
+        segments.append((
+            text_token,
+            np.zeros((text_length, self.patch_size, self.latent_dim), dtype=np.float32),
+            np.ones(text_length, dtype=np.float32),
+            np.zeros(text_length, dtype=np.float32),
+        ))
+
+        if has_prompt_audio:
+            prompt_len = prompt_feat.shape[0]
+            segments.append((
+                np.zeros(prompt_len, dtype=np.int32),
+                prompt_feat,
+                np.zeros(prompt_len, dtype=np.float32),
+                np.ones(prompt_len, dtype=np.float32),
+            ))
+
+        text_token = np.concatenate([s[0] for s in segments])
+        audio_feat = np.concatenate([s[1] for s in segments], axis=0)
+        text_mask_1d = np.concatenate([s[2] for s in segments])
+        feat_mask_1d = np.concatenate([s[3] for s in segments])
 
         total_length = len(text_token)
 
@@ -1019,74 +931,19 @@ class VoxCPM2Generator:
             chunk = patch.T.reshape(1, self.latent_dim, self.patch_size)
             self.vae_decoder.decode_chunk(chunk)
 
-    @staticmethod
-    def _encode_lm_snapshot(snapshot: dict, arrays: dict[str, np.ndarray], prefix: str):
-        kind = snapshot.get("kind")
-        if kind == "CoreMLMiniCPMLM":
-            encoded_arrays = []
-            for name, value in snapshot.get("arrays", {}).items():
-                key = f"{prefix}_{len(arrays)}"
-                arrays[key] = np.asarray(value, dtype=np.float16)
-                encoded_arrays.append({"name": name, "key": key})
-            return {
-                "kind": kind,
-                "position": int(snapshot["position"]),
-                "arrays": encoded_arrays,
-            }
-        if kind == "CoreMLMiniCPMLMChain":
-            return {
-                "kind": kind,
-                "position": int(snapshot["position"]),
-                "submodels": [
-                    VoxCPM2Generator._encode_lm_snapshot(
-                        sub_snapshot, arrays, f"{prefix}_part{idx}"
-                    )
-                    for idx, sub_snapshot in enumerate(snapshot.get("submodels", []))
-                ],
-            }
-        raise ValueError(f"unsupported LM snapshot kind: {kind!r}")
-
-    @staticmethod
-    def _decode_lm_snapshot(encoded: dict, arrays: dict[str, np.ndarray]) -> dict:
-        kind = encoded.get("kind")
-        if kind == "CoreMLMiniCPMLM":
-            return {
-                "kind": kind,
-                "position": int(encoded["position"]),
-                "arrays": {
-                    item["name"]: np.asarray(arrays[item["key"]], dtype=np.float16)
-                    for item in encoded.get("arrays", [])
-                },
-            }
-        if kind == "CoreMLMiniCPMLMChain":
-            return {
-                "kind": kind,
-                "position": int(encoded["position"]),
-                "submodels": [
-                    VoxCPM2Generator._decode_lm_snapshot(sub_snapshot, arrays)
-                    for sub_snapshot in encoded.get("submodels", [])
-                ],
-            }
-        raise ValueError(f"unsupported LM snapshot kind: {kind!r}")
-
     def _save_lm_prefix_cache(self, cache_path: Path, prefix_length: int) -> None:
         """Save base/residual LM KV prefix slices as float16."""
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             arrays: dict[str, np.ndarray] = {}
+            for k, v in self.base_lm.snapshot_state_prefix(prefix_length).items():
+                arrays[f"base:{k}"] = np.asarray(v, dtype=np.float16)
+            for k, v in self.residual_lm.snapshot_state_prefix(prefix_length).items():
+                arrays[f"residual:{k}"] = np.asarray(v, dtype=np.float16)
+
             metadata = {
-                "version": 1,
+                "version": 2,
                 "prefix_length": int(prefix_length),
-                "base_lm": self._encode_lm_snapshot(
-                    self.base_lm.snapshot_state_prefix(prefix_length),
-                    arrays,
-                    "base",
-                ),
-                "residual_lm": self._encode_lm_snapshot(
-                    self.residual_lm.snapshot_state_prefix(prefix_length),
-                    arrays,
-                    "residual",
-                ),
             }
             tmp_path = cache_path.with_name(cache_path.name + ".tmp.npz")
             np.savez_compressed(
@@ -1107,19 +964,23 @@ class VoxCPM2Generator:
                 metadata = json.loads(str(data["__metadata__"].item()))
                 if int(metadata.get("prefix_length", -1)) != int(prefix_length):
                     return False
-                arrays = {key: data[key] for key in data.files if key != "__metadata__"}
-                self.base_lm.restore_state_prefix(
-                    self._decode_lm_snapshot(metadata["base_lm"], arrays)
-                )
-                self.residual_lm.restore_state_prefix(
-                    self._decode_lm_snapshot(metadata["residual_lm"], arrays)
-                )
+                if int(metadata.get("version", 1)) != 2:
+                    return False
+                base_snapshot = {}
+                residual_snapshot = {}
+                for key in data.files:
+                    if key == "__metadata__":
+                        continue
+                    if key.startswith("base:"):
+                        base_snapshot[key[5:]] = data[key]
+                    elif key.startswith("residual:"):
+                        residual_snapshot[key[9:]] = data[key]
+
+                self.base_lm.restore_state_prefix(base_snapshot, prefix_length)
+                self.residual_lm.restore_state_prefix(residual_snapshot, prefix_length)
             return True
         except Exception as exc:
-            print(
-                f"⚠️  Ignoring invalid LM prefix cache {cache_path}: {exc}",
-                flush=True,
-            )
+            print(f"⚠️  Ignoring invalid LM prefix cache {cache_path}: {exc}", flush=True)
             return False
 
     def _restore_lm_prefix_cache_from_paths(

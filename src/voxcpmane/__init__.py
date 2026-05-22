@@ -9,7 +9,7 @@ from .generator import (
     load_embed_tokens,
     load_embed_tokens_from_safetensors,
 )
-from .lm import CoreMLMiniCPMLM, CoreMLMiniCPMLMChain
+from .lm import CoreMLMiniCPMLM
 from .locdit import CoreMLUnifiedCFM
 
 __all__ = [
@@ -20,6 +20,5 @@ __all__ = [
     "VoxCPM2Generator",
     "load_embed_tokens_from_safetensors",
     "CoreMLMiniCPMLM",
-    "CoreMLMiniCPMLMChain",
     "CoreMLUnifiedCFM",
 ]

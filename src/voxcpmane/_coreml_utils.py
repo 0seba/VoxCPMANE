@@ -35,6 +35,32 @@ def is_compiled_model_path(path: Path) -> bool:
     return path.suffix == ".mlmodelc"
 
 
+def resolve_model_path(
+    path: Path,
+    *,
+    use_compiled: bool = True,
+    compiled_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve compiled counterpart (.mlmodelc) for a model package path."""
+    compiled = path.with_suffix(".mlmodelc")
+    if (
+        use_compiled
+        and compiled.exists()
+        and (compiled / "metadata.json").exists()
+        and (compiled / "model.mil").exists()
+    ):
+        return compiled
+    if use_compiled and compiled_dir is not None:
+        fallback = compiled_dir / path.with_suffix(".mlmodelc").name
+        if (
+            fallback.exists()
+            and (fallback / "metadata.json").exists()
+            and (fallback / "model.mil").exists()
+        ):
+            return fallback
+    return path
+
+
 def load_compiled_metadata_entry(path: Path) -> dict:
     """Read the first entry from the ``metadata.json`` sidecar."""
     metadata_path = path / "metadata.json"
