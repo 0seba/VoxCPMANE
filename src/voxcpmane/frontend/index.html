@@ -55,10 +55,27 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                             (See Samples)
                         </a>
                     </label>
-                    <select id="voice-select" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
-                        <option value="">Manual prompt / zero-shot</option>
-                    </select>
+                    <div class="flex gap-3">
+                        <select id="voice-select" class="flex-1 min-w-0 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                            <option value="">Manual prompt / zero-shot</option>
+                        </select>
+                        <button type="button" id="delete-voice-button" class="px-4 py-3 bg-red-700 text-white font-semibold rounded-lg shadow-lg hover:bg-red-800 transition duration-300 disabled:opacity-40 disabled:cursor-not-allowed" disabled>
+                            Delete
+                        </button>
+                    </div>
                     <div id="voice-status" class="mt-2 text-sm text-gray-400"></div>
+                </div>
+
+                <div id="voice-mode-section" class="hidden">
+                    <label for="voice-mode" class="block text-sm font-medium text-gray-300 mb-2">
+                        Preset Voice Mode
+                    </label>
+                    <select id="voice-mode" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        <option value="reference">Reference only (lower latency)</option>
+                        <option value="reference_plus_prompt">Reference + prompt WAV/text</option>
+                        <option value="high_similarity">High similarity (uses transcript)</option>
+                    </select>
+                    <div class="mt-1 text-xs text-gray-500">Reference + prompt uses the selected voice as reference and the prompt WAV/text as continuation. High similarity uses cached prompt data when available.</div>
                 </div>
 
                 <div id="reference-section">
@@ -106,8 +123,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                         <label for="max-length" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
                             Max Length (~0.16s per unit)
                         </label>
-                        <input type="number" id="max-length" value="2048" min="1" max="2048" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
-                        <div class="mt-1 text-xs text-gray-500">Maximum generated audio steps (1-2048)</div>
+                        <input type="number" id="max-length" value="2048" min="1" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        <div class="mt-1 text-xs text-gray-500">Maximum generated audio steps (limited by LM cache)</div>
                     </div>
                     <div class="flex flex-col">
                         <label for="cfg-value" class="flex items-start text-sm font-medium text-gray-300 mb-2 md:min-h-[2.75rem]">
@@ -180,7 +197,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             <form id="create-voice-form" class="space-y-6 bg-gray-800 p-6 rounded-xl shadow-2xl">
                 <div>
                     <h2 class="text-xl font-semibold mb-4 text-purple-400">Create New Cached Voice</h2>
-                    <p class="text-sm text-gray-400 mb-6">Compile an audio prompt into a reusable voice cache. Files must exist on the server.</p>
+                    <p class="text-sm text-gray-400 mb-6">Compile a reference audio file into a reusable voice cache. Files must exist on the server.</p>
                 </div>
 
                 <div>
@@ -192,16 +209,16 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
 
                 <div>
                     <label for="new-voice-audio" class="block text-sm font-medium text-gray-300 mb-2">
-                        Prompt Audio Path (Server)
+                        Reference Audio Path (Server)
                     </label>
                     <input type="text" id="new-voice-audio" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="/path/to/audio.wav (or .mp3, .flac...)" required>
                 </div>
 
                 <div>
                     <label for="new-voice-text" class="block text-sm font-medium text-gray-300 mb-2">
-                        Prompt Transcription (or Path)
+                        Prompt Transcription (Optional)
                     </label>
-                    <textarea id="new-voice-text" rows="3" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Exact transcription of the audio, OR /path/to/transcript.txt" required></textarea>
+                    <textarea id="new-voice-text" rows="3" class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition" placeholder="Optional exact transcript, or /path/to/transcript.txt for higher-similarity continuation cloning"></textarea>
                 </div>
 
                 <div>
@@ -237,7 +254,11 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         
         // --- Voice Selection Elements ---
         const voiceSelect = document.getElementById('voice-select');
+        const voiceModeSection = document.getElementById('voice-mode-section');
+        const voiceModeSelect = document.getElementById('voice-mode');
+        const deleteVoiceButton = document.getElementById('delete-voice-button');
         const voiceStatus = document.getElementById('voice-status');
+        const referenceSection = document.getElementById('reference-section');
         const promptSection = document.getElementById('prompt-section');
         const promptTextSection = document.getElementById('prompt-text-section');
         
@@ -297,6 +318,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const TARGET_SCHEDULE_AHEAD_SECONDS = 1.2;
         const RESTART_DELAY_SECONDS = 0.08;
         const FADE_SECONDS = 0.005;
+        let customVoices = new Set();
         
         // --- Array to store audio chunks for final playback ---
         let audioChunks = [];
@@ -325,8 +347,10 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         // --- Load available voices on page load ---
         async function loadAvailableVoices() {
             try {
+                const previousVoice = voiceSelect.value;
                 const response = await fetch('/voices');
                 const data = await response.json();
+                customVoices = new Set(data.custom_voices || []);
                 
                 // Clear existing options except the first one
                 voiceSelect.innerHTML = '<option value="">Manual prompt / zero-shot</option>';
@@ -336,32 +360,91 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     const option = document.createElement('option');
                     option.value = voice;
                     option.textContent = voice;
+                    if (customVoices.has(voice)) {
+                        option.textContent = `${voice} (custom)`;
+                    }
                     voiceSelect.appendChild(option);
                 });
+
+                if ([...voiceSelect.options].some(option => option.value === previousVoice)) {
+                    voiceSelect.value = previousVoice;
+                }
                 
                 voiceStatus.textContent = `Found ${data.count} available voices`;
                 voiceStatus.className = 'mt-2 text-sm text-green-400';
+                updateVoiceSelectionState({ preserveEmptyStatus: true });
                 
             } catch (error) {
                 console.error('Error loading voices:', error);
                 voiceStatus.textContent = 'Failed to load available voices';
                 voiceStatus.className = 'mt-2 text-sm text-red-400';
+                deleteVoiceButton.disabled = true;
+            }
+        }
+
+        function updateVoiceSelectionState({ preserveEmptyStatus = false } = {}) {
+            const selectedVoice = voiceSelect.value;
+            const isCustomVoice = customVoices.has(selectedVoice);
+            const mode = voiceModeSelect.value;
+            const showPromptFields = selectedVoice && mode === 'reference_plus_prompt';
+            deleteVoiceButton.disabled = !isCustomVoice;
+
+            if (selectedVoice) {
+                voiceModeSection.classList.remove('hidden');
+                referenceSection.style.display = 'none';
+                promptSection.style.display = showPromptFields ? 'block' : 'none';
+                promptTextSection.style.display = showPromptFields ? 'block' : 'none';
+                voiceStatus.textContent = isCustomVoice
+                    ? `Using custom voice: ${selectedVoice}`
+                    : `Using cached voice: ${selectedVoice}`;
+                voiceStatus.className = 'mt-2 text-sm text-blue-400';
+            } else {
+                voiceModeSection.classList.add('hidden');
+                referenceSection.style.display = 'block';
+                promptSection.style.display = 'block';
+                promptTextSection.style.display = 'block';
+                if (!preserveEmptyStatus) {
+                    voiceStatus.textContent = 'Using manual prompt/reference fields';
+                    voiceStatus.className = 'mt-2 text-sm text-gray-400';
+                }
             }
         }
 
         // --- Handle voice selection changes ---
-        voiceSelect.addEventListener('change', (event) => {
-            const selectedVoice = event.target.value;
-            if (selectedVoice) {
-                promptSection.style.display = 'none';
-                promptTextSection.style.display = 'none';
-                voiceStatus.textContent = `Using cached voice: ${selectedVoice}`;
-                voiceStatus.className = 'mt-2 text-sm text-blue-400';
-            } else {
-                promptSection.style.display = 'block';
-                promptTextSection.style.display = 'block';
-                voiceStatus.textContent = 'Using manual prompt/reference fields';
-                voiceStatus.className = 'mt-2 text-sm text-gray-400';
+        voiceSelect.addEventListener('change', updateVoiceSelectionState);
+        voiceModeSelect.addEventListener('change', updateVoiceSelectionState);
+
+        deleteVoiceButton.addEventListener('click', async () => {
+            const selectedVoice = voiceSelect.value;
+            if (!customVoices.has(selectedVoice)) {
+                return;
+            }
+            if (!confirm(`Delete custom voice "${selectedVoice}"?`)) {
+                return;
+            }
+
+            deleteVoiceButton.disabled = true;
+            const originalText = deleteVoiceButton.textContent;
+            deleteVoiceButton.textContent = 'Deleting...';
+
+            try {
+                const response = await fetch(`/v1/voices/${encodeURIComponent(selectedVoice)}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.detail || 'Failed to delete voice');
+                }
+
+                voiceSelect.value = '';
+                await loadAvailableVoices();
+                showStatus(`Voice '${selectedVoice}' deleted.`, 'success');
+            } catch (error) {
+                console.error('Delete voice error:', error);
+                showStatus(`Error deleting voice: ${error.message}`, 'error');
+                updateVoiceSelectionState();
+            } finally {
+                deleteVoiceButton.textContent = originalText;
             }
         });
 
@@ -493,18 +576,30 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                 requestBody.seed = parseInt(seedValue, 10);
             }
 
-            const referenceWavPath = referenceWavPathInput.value.trim();
-            if (referenceWavPath) {
-                requestBody.reference_wav_path = referenceWavPath;
-            }
-
             const selectedVoice = voiceSelect.value;
             if (selectedVoice) {
                 requestBody.voice = selectedVoice;
+                requestBody.voice_mode = voiceModeSelect.value;
+                if (voiceModeSelect.value === 'reference_plus_prompt') {
+                    const promptWavPath = promptWavPathInput.value.trim();
+                    const promptText = promptTextInput.value.trim();
+                    if (!promptWavPath || !promptText) {
+                        throw new Error('Prompt WAV path and prompt text are required for Reference + prompt mode.');
+                    }
+                    requestBody.prompt_wav_path = promptWavPath;
+                    requestBody.prompt_text = promptText;
+                }
             } else {
+                const referenceWavPath = referenceWavPathInput.value.trim();
+                if (referenceWavPath) {
+                    requestBody.reference_wav_path = referenceWavPath;
+                }
                 const promptWavPath = promptWavPathInput.value.trim();
                 const promptText = promptTextInput.value.trim();
                 if (promptWavPath) {
+                    if (!promptText) {
+                        throw new Error('Prompt text is required when using a prompt WAV.');
+                    }
                     requestBody.prompt_wav_path = promptWavPath;
                     requestBody.prompt_text = promptText;
                 }
@@ -934,8 +1029,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             const promptText = newVoiceTextInput.value.trim();
             const replace = newVoiceReplaceCheckbox.checked;
 
-            if (!name || !audioPath || !promptText) {
-                showStatus('All fields are required.', 'error');
+            if (!name || !audioPath) {
+                showStatus('Voice name and reference audio path are required.', 'error');
                 return;
             }
 
@@ -951,7 +1046,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     },
                     body: JSON.stringify({
                         voice_name: name,
-                        prompt_wav_path: audioPath,
+                        reference_wav_path: audioPath,
                         prompt_text: promptText,
                         replace: replace
                     })
@@ -963,7 +1058,10 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     throw new Error(result.detail || 'Failed to create voice');
                 }
 
-                showStatus(`Success! Voice '${name}' created. Switching to Generate tab...`, 'success');
+                const modeLabel = result.mode === 'reference_plus_continuation'
+                    ? ' with transcript'
+                    : '';
+                showStatus(`Success! Voice '${name}' created${modeLabel}. Switching to Generate tab...`, 'success');
 
                 // Refresh voice list
                 await loadAvailableVoices();

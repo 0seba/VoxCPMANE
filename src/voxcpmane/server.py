@@ -13,6 +13,7 @@ import re
 import time
 import threading
 import queue
+import glob
 import numpy as np
 import sounddevice as sd
 import uvicorn
@@ -25,7 +26,6 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
-import tempfile
 import soundfile
 import soxr
 from pydantic import BaseModel
@@ -58,10 +58,12 @@ except ImportError:
     PYDUB_AVAILABLE = False
 
 
-REPO_ID = "seba/VoxCPM2-ANE"
+REPO_ID = "seba/VoxCPM2ANE-Preview"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
+VOICE_CACHE_DIRS: list[str] = []
 CUSTOM_VOICE_CACHE_DIR = os.path.expanduser("~/.cache/ane_tts")
+PROMPT_DECODE_CONTEXT_PATCHES = 3
 LM_MULTIFUNCTION_PREFILL_LENGTHS = (1, 8, 16, 32, 64, 128)
 RAW_AUDIO_FORMATS = {"wav", "flac"}
 PYDUB_AUDIO_FORMATS = {
@@ -73,6 +75,7 @@ PYDUB_AUDIO_FORMATS = {
 
 generator: VoxCPM2Generator = None  # type: ignore[assignment]
 text_normalizer = None
+VOICE_FEATURE_CACHE_MEMORY: dict[tuple[str, str], np.ndarray] = {}
 
 
 def resolve_and_compile_path(
@@ -107,14 +110,16 @@ def resolve_and_compile_path(
 
 def load_model(
     model_dir: str | None = None,
+    repo_id: str = REPO_ID,
+    included_voice_cache_dir: str | None = None,
     embedding_path: str | None = None,
     lm_mode: str = "hot-swap",
     lm_prefill_chunk_size: int | None = 128,
     lm_async_decode_load: bool = False,
     base_lm_splits: int = 2,
     compiled_fallback_dir: str | None = None,
-    vae_early_decode_steps: int = 0,
-    vae_batch_decode_steps: int = 1,
+    vae_early_decode_steps: int = 16,
+    vae_batch_decode_steps: int = 4,
     base_lm_path: list[str] | None = None,
     residual_lm_path: str | None = None,
     locdit_path: str | None = None,
@@ -126,16 +131,43 @@ def load_model(
     compile_and_save: bool = False,
 ):
     """Load VoxCPM2Generator. Called once from main()."""
-    global generator, MODEL_PATH_PREFIX, VOICE_CACHE_DIR
+    global generator, MODEL_PATH_PREFIX, VOICE_CACHE_DIR, VOICE_CACHE_DIRS
 
     if model_dir is not None:
         MODEL_PATH_PREFIX = os.path.abspath(model_dir)
         print(f"📂 Using local model directory: {MODEL_PATH_PREFIX}")
     else:
-        print(f"🚀 Downloading models from HuggingFace: {REPO_ID}")
-        MODEL_PATH_PREFIX = snapshot_download(repo_id=REPO_ID)
+        print(f"🚀 Downloading models from HuggingFace: {repo_id}")
+        MODEL_PATH_PREFIX = snapshot_download(repo_id=repo_id)
 
-    VOICE_CACHE_DIR = os.path.join(MODEL_PATH_PREFIX, "caches")
+    model_voice_cache_dir = os.path.join(MODEL_PATH_PREFIX, "caches")
+    if included_voice_cache_dir is not None:
+        VOICE_CACHE_DIR = os.path.abspath(included_voice_cache_dir)
+        print(f"🎙️ Using included voice cache directory: {VOICE_CACHE_DIR}")
+    elif os.path.isdir(model_voice_cache_dir):
+        VOICE_CACHE_DIR = model_voice_cache_dir
+    else:
+        print(f"🎙️ Downloading included voice caches from HuggingFace: {repo_id}")
+        voice_snapshot_dir = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns="caches/*",
+        )
+        VOICE_CACHE_DIR = os.path.join(voice_snapshot_dir, "caches")
+    VOICE_CACHE_DIRS = [VOICE_CACHE_DIR]
+
+    try:
+        hf_voice_snapshot_dir = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns="caches/*",
+        )
+        hf_voice_cache_dir = os.path.join(hf_voice_snapshot_dir, "caches")
+        if os.path.isdir(hf_voice_cache_dir) and os.path.abspath(
+            hf_voice_cache_dir
+        ) not in {os.path.abspath(d) for d in VOICE_CACHE_DIRS}:
+            VOICE_CACHE_DIRS.append(hf_voice_cache_dir)
+            print(f"🎙️ Using HF voice cache fallback: {hf_voice_cache_dir}")
+    except Exception as exc:
+        print(f"⚠️ Could not initialize HF voice cache fallback: {exc}")
 
     # Helper to resolve / compile paths
     def get_path(custom_path: str | None, default_filename: str) -> str:
@@ -146,9 +178,21 @@ def load_model(
         )
         return resolve_and_compile_path(target, compile_and_save)
 
+    def default_model_path(*filenames: str) -> str:
+        for filename in filenames:
+            path = os.path.join(MODEL_PATH_PREFIX, filename)
+            if os.path.exists(path):
+                return path
+            if filename.endswith(".mlpackage"):
+                compiled = str(pathlib.Path(path).with_suffix(".mlmodelc"))
+                if os.path.exists(compiled):
+                    return path
+        return os.path.join(MODEL_PATH_PREFIX, filenames[0])
+
     # 1. Resolve BaseLM package(s) and splits
     base_lm_split_paths = None
     resolved_base_lm_path = None
+    default_base_lm = default_model_path("base_lm_multifunction.mlpackage")
 
     if base_lm_path:
         # Check for split package sibling auto-detection if only one path is provided
@@ -173,6 +217,16 @@ def load_model(
             resolved_base_lm_path = resolved_paths[0]
             base_lm_splits = 1
             print(f"   ✓ base_lm override: {resolved_base_lm_path}")
+    elif (
+        pathlib.Path(default_base_lm).exists()
+        or pathlib.Path(default_base_lm).with_suffix(".mlmodelc").exists()
+    ):
+        resolved_base_lm_path = resolve_and_compile_path(
+            default_base_lm,
+            compile_and_save,
+        )
+        base_lm_splits = 1
+        print(f"   ✓ base_lm default: {resolved_base_lm_path}")
     elif base_lm_splits > 1:
         base_lm_split_paths = [
             resolve_and_compile_path(
@@ -186,12 +240,19 @@ def load_model(
         ]
     else:
         resolved_base_lm_path = resolve_and_compile_path(
-            os.path.join(MODEL_PATH_PREFIX, "base_lm_s4.mlpackage"), compile_and_save
+            default_model_path("base_lm_s4.mlpackage"), compile_and_save
         )
 
     # 2. Resolve other model components
     resolved_residual_lm_path = get_path(
-        residual_lm_path, "residual_lm_fused_s4.mlpackage"
+        residual_lm_path,
+        os.path.relpath(
+            default_model_path(
+                "residual_lm_fused_multifunction.mlpackage",
+                "residual_lm_fused_s4.mlpackage",
+            ),
+            MODEL_PATH_PREFIX,
+        ),
     )
     resolved_locdit_path = get_path(locdit_path, "locdit_p4_c4.mlpackage")
     resolved_vae_encoder_path = get_path(
@@ -332,6 +393,7 @@ def generation_worker():
                     prompt_wav_path=job.request.prompt_wav_path,
                     prompt_text=job.request.prompt_text,
                     voice=job.request.voice,
+                    voice_mode=job.request.voice_mode,
                     max_length=job.request.max_length,
                     cfg_value=job.request.cfg_value,
                     inference_timesteps=job.request.inference_timesteps,
@@ -397,6 +459,7 @@ class SpeechRequest(BaseModel):
     model: str = "voxcpm2"
     input: str
     voice: Optional[str] = None
+    voice_mode: Optional[str] = "reference"
     response_format: Optional[str] = "wav"
     control_instruction: Optional[str] = ""
     reference_wav_path: Optional[str] = None
@@ -415,53 +478,240 @@ class PlaybackRequest(SpeechRequest):
 
 class CreateVoiceRequest(BaseModel):
     voice_name: str
-    prompt_wav_path: str
-    prompt_text: str
+    reference_wav_path: Optional[str] = None
+    prompt_text: Optional[str] = ""
     replace: Optional[bool] = False
 
 
 def load_available_voices():
     voices = set()
-    for d in [VOICE_CACHE_DIR, CUSTOM_VOICE_CACHE_DIR]:
+    for d in [*VOICE_CACHE_DIRS, CUSTOM_VOICE_CACHE_DIR]:
         if os.path.exists(d):
             for f in os.listdir(d):
-                if f.endswith(".npy"):
-                    voices.add(f[:-4])
+                if f.endswith(".embed.npy") and not f.endswith(".prompt.embed.npy"):
+                    voices.add(f[: -len(".embed.npy")])
     return sorted(list(voices))
 
 
+def load_voice_names_from_dir(directory: str) -> list[str]:
+    if not os.path.exists(directory):
+        return []
+    return sorted(
+        f[: -len(".embed.npy")]
+        for f in os.listdir(directory)
+        if (
+            f.endswith(".embed.npy")
+            and not f.endswith(".prompt.embed.npy")
+            and os.path.isfile(os.path.join(directory, f))
+        )
+    )
+
+
+def validate_voice_name(voice_name: str) -> str:
+    name = voice_name.strip()
+    if not name or ".." in name or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid voice name")
+    return name
+
+
 def is_default_voice(voice_name: str) -> bool:
-    return os.path.exists(os.path.join(VOICE_CACHE_DIR, f"{voice_name}.npy"))
+    return os.path.exists(os.path.join(VOICE_CACHE_DIR, f"{voice_name}.embed.npy"))
 
 
-def get_voice_prompt_text(voice_name: str) -> str:
+def is_custom_voice(voice_name: str) -> bool:
+    return os.path.exists(
+        os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.embed.npy")
+    )
+
+
+def get_voice_prompt_text(voice_name: str) -> str | None:
     if is_default_voice(voice_name):
         return CACHED_VOICE_TEXT
     txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.txt")
     if os.path.exists(txt_path):
         with open(txt_path, "r", encoding="utf-8") as f:
             return f.read()
-    raise HTTPException(
-        status_code=500,
-        detail=f"Voice '{voice_name}' found but transcription file missing at: {txt_path}",
+    return None
+
+
+def find_voice_cache_path(voice_name: str, suffix: str) -> str | None:
+    for d in [*VOICE_CACHE_DIRS, CUSTOM_VOICE_CACHE_DIR]:
+        path = os.path.join(d, f"{voice_name}{suffix}")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def voice_embed_cache_path(voice_name: str, *, prompt: bool = False) -> str | None:
+    suffix = ".prompt.embed.npy" if prompt else ".embed.npy"
+    return find_voice_cache_path(voice_name, suffix)
+
+
+def voice_prompt_cond_path(voice_name: str) -> str | None:
+    return find_voice_cache_path(voice_name, ".prompt.cond.npy")
+
+
+def voice_prompt_decode_context_path(voice_name: str) -> str | None:
+    return find_voice_cache_path(voice_name, ".prompt.decode_context.npy")
+
+
+def lm_prefix_cache_paths(voice_name: str) -> tuple[list[str], str]:
+    cache_id = generator.lm_prefix_cache_fingerprint()
+    relative = f"{voice_name}.lm_prefix.npz"
+    read_paths = []
+    for voice_cache_dir in VOICE_CACHE_DIRS:
+        included_path = os.path.join(voice_cache_dir, relative)
+        if os.path.exists(included_path) and included_path not in read_paths:
+            read_paths.append(included_path)
+    custom_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, relative)
+    read_paths.append(custom_path)
+    included_hit = any(path != custom_path and os.path.exists(path) for path in read_paths)
+    print(
+        f"🧠 LM prefix cache lookup voice={voice_name} id={cache_id} "
+        f"included={'hit' if included_hit else 'miss'} "
+        f"paths={read_paths}",
+        flush=True,
+    )
+    return read_paths, custom_path
+
+
+def remove_lm_prefix_caches(voice_name: str) -> list[str]:
+    removed = []
+    flat_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.lm_prefix.npz")
+    if os.path.exists(flat_path):
+        try:
+            os.unlink(flat_path)
+            removed.append(os.path.basename(flat_path))
+        except OSError:
+            pass
+    return removed
+
+
+def encode_voice_feature_cache(audio_feat: np.ndarray) -> np.ndarray:
+    audio_feat = np.asarray(audio_feat, dtype=np.float32)
+    if audio_feat.ndim != 3:
+        raise ValueError(f"voice cache must have rank 3, got {audio_feat.shape}")
+    return generator.feat_encoder.encode_patches(audio_feat[None, ...])[0].astype(
+        np.float32, copy=False
     )
 
 
-def load_voice_cache(voice_name: str):
-    for d in [VOICE_CACHE_DIR, CUSTOM_VOICE_CACHE_DIR]:
-        path = os.path.join(d, f"{voice_name}.npy")
-        if os.path.exists(path):
-            return np.load(path)
-    raise HTTPException(
-        status_code=404,
-        detail=f"Voice '{voice_name}' not found. Available: {load_available_voices()}",
+def load_voice_feature_cache(voice_name: str, *, prompt: bool = False) -> np.ndarray:
+    cache_kind = "prompt" if prompt else "reference"
+    memory_key = (voice_name, cache_kind)
+    cached = VOICE_FEATURE_CACHE_MEMORY.get(memory_key)
+    if cached is not None:
+        return cached
+
+    embed_path = voice_embed_cache_path(voice_name, prompt=prompt)
+    if embed_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Voice '{voice_name}' not found. Available: {load_available_voices()}",
+        )
+
+    embed = np.load(embed_path).astype(np.float32, copy=False)
+    if embed.ndim != 2 or embed.shape[1] != generator.hidden_size:
+        cache_name = os.path.basename(embed_path)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Voice cache '{cache_name}' is not in the current feature-cache "
+                f"format. Expected (T, {generator.hidden_size}), got {embed.shape}. "
+                "Regenerate the voice cache with this VoxCPMANE2 version."
+            ),
+        )
+    VOICE_FEATURE_CACHE_MEMORY[memory_key] = embed
+    return embed
+
+
+def load_voice_prompt_cond(voice_name: str) -> np.ndarray:
+    cond_path = voice_prompt_cond_path(voice_name)
+    if cond_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Voice '{voice_name}' has no high-similarity prompt condition cache",
+        )
+    cond = np.load(cond_path).astype(np.float32, copy=False)
+    expected = (generator.patch_size, generator.latent_dim)
+    if cond.shape not in {expected, (generator.latent_dim, generator.patch_size)}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Voice '{voice_name}' prompt condition cache has shape {cond.shape}; "
+                f"expected {expected}."
+            ),
+        )
+    return cond
+
+
+def load_voice_prompt_decode_context(voice_name: str) -> np.ndarray:
+    context_path = voice_prompt_decode_context_path(voice_name)
+    if context_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Voice '{voice_name}' has no high-similarity VAE decode context cache",
+        )
+    context = np.load(context_path).astype(np.float32, copy=False)
+    if context.ndim != 3 or context.shape[1:] not in {
+        (generator.patch_size, generator.latent_dim),
+        (generator.latent_dim, generator.patch_size),
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Voice '{voice_name}' prompt decode context cache has shape "
+                f"{context.shape}; expected (N, {generator.patch_size}, "
+                f"{generator.latent_dim})."
+            ),
+        )
+    return context
+
+
+def compile_voice_feature_cache_from_audio(
+    voice_name: str,
+    audio_path: str,
+    *,
+    prompt: bool = False,
+) -> None:
+    padding_mode = "left" if prompt else "right"
+    audio_feat = generator.vae_encoder.encode_wav(audio_path, padding_mode=padding_mode)
+    embed = encode_voice_feature_cache(audio_feat)
+    embed_suffix = ".prompt.embed.npy" if prompt else ".embed.npy"
+    np.save(os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}{embed_suffix}"), embed)
+    if prompt and audio_feat.shape[0] > 0:
+        np.save(
+            os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.prompt.cond.npy"),
+            audio_feat[-1],
+        )
+        context = audio_feat[-PROMPT_DECODE_CONTEXT_PATCHES:]
+        np.save(
+            os.path.join(
+                CUSTOM_VOICE_CACHE_DIR, f"{voice_name}.prompt.decode_context.npy"
+            ),
+            context,
+        )
+
+
+def get_lm_cache_length() -> int | None:
+    return (
+        int(generator.lm_cache_length)
+        if generator.lm_cache_length is not None
+        else None
     )
 
 
 def validate_voice_parameters(max_length, cfg_value, inference_timesteps):
-    if not (0 < max_length <= 4096):
+    cache_length = get_lm_cache_length()
+    if max_length <= 0:
+        raise HTTPException(status_code=400, detail="max_length must be positive")
+    if cache_length is not None and max_length > cache_length:
         raise HTTPException(
-            status_code=400, detail="max_length must be between 1 and 4096"
+            status_code=400,
+            detail=(
+                f"max_length must be between 1 and {cache_length}; "
+                "the upper bound is the LM KV cache length"
+            ),
         )
     if not (0.0 <= cfg_value <= 10.0):
         raise HTTPException(
@@ -565,6 +815,7 @@ def generate_audio_chunks(
     prompt_wav_path=None,
     prompt_text=None,
     voice=None,
+    voice_mode="reference",
     max_length=2048,
     cfg_value=2.0,
     inference_timesteps=10,
@@ -601,17 +852,66 @@ def generate_audio_chunks(
     prompt_path = (prompt_wav_path or "").strip() or None
     prompt_text_clean = (prompt_text or "").strip()
 
-    prompt_audio_feat = None
+    prompt_audio_embed = None
+    reference_audio_embed = None
+    prompt_prefix_feat_cond = None
+    prompt_decode_context = None
+    gen_kwargs_lm_prefix_cache_path = None
+    gen_kwargs_lm_prefix_cache_read_paths = None
     voice_name = (voice or "").strip() or None
     if voice_name is not None:
-        if prompt_path is not None:
+        voice_name = validate_voice_name(voice_name)
+        voice_mode_clean = (voice_mode or "reference").strip().replace("-", "_")
+        if voice_mode_clean not in {
+            "reference",
+            "reference_plus_prompt",
+            "high_similarity",
+        }:
             raise ValueError(
-                "voice and prompt_wav_path are both continuation prompts; use only one"
+                "voice_mode must be 'reference', 'reference_plus_prompt', "
+                "or 'high_similarity'"
             )
-        audio_cache = load_voice_cache(voice_name)
-        voice_prompt_text = get_voice_prompt_text(voice_name)
-        prompt_text_clean = voice_prompt_text.strip()
-        prompt_audio_feat = audio_cache.astype(np.float32, copy=False)
+        if reference_path is not None:
+            raise ValueError(
+                "voice and reference_wav_path are both voice references; use only one"
+            )
+        if prompt_path is not None and voice_mode_clean != "reference_plus_prompt":
+            raise ValueError(
+                "prompt_wav_path with a preset voice requires "
+                "voice_mode='reference_plus_prompt'"
+            )
+        if voice_mode_clean == "reference_plus_prompt":
+            if prompt_path is None:
+                raise ValueError(
+                    "voice_mode='reference_plus_prompt' requires prompt_wav_path"
+                )
+            if not prompt_text_clean:
+                raise ValueError(
+                    "voice_mode='reference_plus_prompt' requires prompt_text"
+                )
+        reference_audio_embed = load_voice_feature_cache(voice_name).astype(
+            np.float32, copy=False
+        )
+        (
+            gen_kwargs_lm_prefix_cache_read_paths,
+            gen_kwargs_lm_prefix_cache_path,
+        ) = lm_prefix_cache_paths(voice_name)
+        voice_prompt_text = (
+            get_voice_prompt_text(voice_name)
+            if voice_mode_clean == "high_similarity"
+            else None
+        )
+        if voice_mode_clean == "high_similarity" and not voice_prompt_text:
+            raise ValueError(
+                f"voice '{voice_name}' has no prompt transcription for high_similarity mode"
+            )
+        if voice_prompt_text:
+            prompt_text_clean = voice_prompt_text.strip()
+            prompt_audio_embed = load_voice_feature_cache(
+                voice_name, prompt=True
+            ).astype(np.float32, copy=False)
+            prompt_prefix_feat_cond = load_voice_prompt_cond(voice_name)
+            prompt_decode_context = load_voice_prompt_decode_context(voice_name)
 
     for label, path in (
         ("reference_wav_path", reference_path),
@@ -619,6 +919,8 @@ def generate_audio_chunks(
     ):
         if path is not None and not os.path.exists(path):
             raise FileNotFoundError(f"{label} does not exist: {path}")
+    if prompt_path is not None and not prompt_text_clean:
+        raise ValueError("prompt_text is required when prompt_wav_path is provided")
 
     target_text_length = len(generator._encode_text(final_text))
     effective_max_length = min(int(target_text_length * 6.0 + 10), int(max_length))
@@ -630,17 +932,26 @@ def generate_audio_chunks(
         max_len=effective_max_length,
         seed=seed,
     )
+    if voice_name is not None:
+        gen_kwargs["lm_prefix_cache_path"] = gen_kwargs_lm_prefix_cache_path
+        gen_kwargs["lm_prefix_cache_read_paths"] = (
+            gen_kwargs_lm_prefix_cache_read_paths
+        )
     if reference_path is not None:
         gen_kwargs["reference_wav_path"] = reference_path
+    elif reference_audio_embed is not None:
+        gen_kwargs["reference_audio_embed"] = reference_audio_embed
     if prompt_path is not None:
         gen_kwargs["prompt_wav_path"] = prompt_path
         gen_kwargs["prompt_text"] = prompt_text_clean
-    elif prompt_audio_feat is not None:
-        gen_kwargs["prompt_audio_feat"] = prompt_audio_feat
+    elif prompt_audio_embed is not None:
+        gen_kwargs["prompt_audio_embed"] = prompt_audio_embed
+        gen_kwargs["prompt_prefix_feat_cond"] = prompt_prefix_feat_cond
+        gen_kwargs["prompt_decode_context"] = prompt_decode_context
         gen_kwargs["prompt_text"] = prompt_text_clean
 
-    has_reference = reference_path is not None
-    has_prompt = prompt_path is not None or prompt_audio_feat is not None
+    has_reference = reference_path is not None or reference_audio_embed is not None
+    has_prompt = prompt_path is not None or prompt_audio_embed is not None
     if has_reference and has_prompt:
         mode = "reference_plus_continuation"
     elif has_reference:
@@ -686,71 +997,8 @@ def generate_audio_chunks(
         cancellation_event.set()
 
 
-def scan_and_compile_audio_cache():
-    """Scan custom cache dir for audio+txt pairs and compile missing .npy caches."""
-    if not os.path.exists(CUSTOM_VOICE_CACHE_DIR):
-        return
-
-    AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac", ".m4a"}
-    try:
-        files = os.listdir(CUSTOM_VOICE_CACHE_DIR)
-    except Exception as e:
-        print(f"⚠️  Failed to list custom cache dir: {e}")
-        return
-
-    file_map = {}
-    for f in files:
-        name, ext = os.path.splitext(f)
-        file_map.setdefault(name, set()).add(ext.lower())
-
-    for name, extensions in file_map.items():
-        if ".npy" in extensions:
-            continue
-        has_txt = ".txt" in extensions
-        audio_ext = next((ext for ext in extensions if ext in AUDIO_EXTENSIONS), None)
-
-        if has_txt and audio_ext:
-            print(f"🔄 Compiling cache for voice: '{name}' from {audio_ext}...")
-            audio_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}{audio_ext}")
-            txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.txt")
-
-            try:
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    prompt_text_val = f.read()
-            except Exception as e:
-                print(f"❌ Failed to read text for '{name}': {e}")
-                continue
-
-            tmp_wav_path = None
-            try:
-                processing_path = audio_path
-                if PYDUB_AVAILABLE and audio_ext not in [".wav", ".flac", ".ogg"]:
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".wav", delete=False
-                    ) as tmp:
-                        tmp_wav_path = tmp.name
-                    AudioSegment.from_file(audio_path).export(
-                        tmp_wav_path, format="wav"
-                    )
-                    processing_path = tmp_wav_path
-
-                patches = generator.vae_encoder.encode_wav(processing_path)
-                npy_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.npy")
-                np.save(npy_path, patches)
-                print(f"✅ Compiled voice: '{name}'")
-            except Exception as e:
-                print(f"❌ Failed to compile voice '{name}': {e}")
-            finally:
-                if tmp_wav_path and os.path.exists(tmp_wav_path):
-                    try:
-                        os.unlink(tmp_wav_path)
-                    except OSError:
-                        pass
-
-
 @app.on_event("startup")
 async def startup_event():
-    scan_and_compile_audio_cache()
     threading.Thread(target=generation_worker, daemon=True).start()
 
 
@@ -908,36 +1156,61 @@ async def cancel_generation():
 
 @app.post("/v1/voices")
 async def create_voice(request: CreateVoiceRequest):
-    name = request.voice_name
-    if ".." in name or "/" in name or "\\" in name:
-        raise HTTPException(status_code=400, detail="Invalid voice name")
+    name = validate_voice_name(request.voice_name)
     if is_default_voice(name):
         raise HTTPException(status_code=403, detail=f"'{name}' is a system voice")
 
-    npy_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.npy")
-    if os.path.exists(npy_path) and not request.replace:
+    embed_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.embed.npy")
+    if os.path.exists(embed_path) and not request.replace:
         raise HTTPException(
             status_code=409, detail=f"'{name}' exists. Set replace=True."
         )
 
-    prompt_text_val = request.prompt_text
-    if os.path.isfile(prompt_text_val):
-        with open(prompt_text_val, "r", encoding="utf-8") as f:
-            prompt_text_val = f.read()
+    audio_path = (request.reference_wav_path or "").strip()
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="reference_wav_path is required")
 
-    if not os.path.exists(request.prompt_wav_path):
-        raise HTTPException(
-            status_code=400, detail=f"Audio not found: {request.prompt_wav_path}"
-        )
+    prompt_text_val = (request.prompt_text or "").strip()
+    if prompt_text_val and os.path.isfile(prompt_text_val):
+        with open(prompt_text_val, "r", encoding="utf-8") as f:
+            prompt_text_val = f.read().strip()
+
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"Audio not found: {audio_path}")
 
     try:
-        patches = generator.vae_encoder.encode_wav(request.prompt_wav_path)
         os.makedirs(CUSTOM_VOICE_CACHE_DIR, exist_ok=True)
-        np.save(npy_path, patches)
+        VOICE_FEATURE_CACHE_MEMORY.pop((name, "reference"), None)
+        VOICE_FEATURE_CACHE_MEMORY.pop((name, "prompt"), None)
+        for stale_suffix in (
+            ".embed.npy",
+            ".prompt.embed.npy",
+            ".prompt.cond.npy",
+            ".prompt.decode_context.npy",
+            ".npy",
+        ):
+            stale_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}{stale_suffix}")
+            if os.path.exists(stale_path):
+                os.unlink(stale_path)
+        remove_lm_prefix_caches(name)
+
+        compile_voice_feature_cache_from_audio(name, audio_path)
         txt_path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}.txt")
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(prompt_text_val)
-        return {"status": "success", "message": f"Voice '{name}' created."}
+        if prompt_text_val:
+            compile_voice_feature_cache_from_audio(name, audio_path, prompt=True)
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(prompt_text_val)
+            mode = "reference_plus_continuation"
+        else:
+            if os.path.exists(txt_path):
+                os.unlink(txt_path)
+            mode = "reference"
+
+        return {
+            "status": "success",
+            "message": f"Voice '{name}' created.",
+            "mode": mode,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed: {e}")
 
@@ -945,10 +1218,62 @@ async def create_voice(request: CreateVoiceRequest):
 @app.get("/voices")
 async def get_available_voices():
     voices = load_available_voices()
+    system_voices = load_voice_names_from_dir(VOICE_CACHE_DIR)
+    custom_voices = load_voice_names_from_dir(CUSTOM_VOICE_CACHE_DIR)
     return {
         "voices": voices,
         "count": len(voices),
+        "system_voices": system_voices,
+        "custom_voices": custom_voices,
+        "included_voice_cache_directory": VOICE_CACHE_DIR,
+        "included_voice_cache_directories": VOICE_CACHE_DIRS,
         "custom_cache_directory": CUSTOM_VOICE_CACHE_DIR,
+    }
+
+
+@app.delete("/v1/voices/{voice_name}")
+async def delete_voice(voice_name: str):
+    name = validate_voice_name(voice_name)
+    if not is_custom_voice(name):
+        if is_default_voice(name):
+            raise HTTPException(status_code=403, detail=f"'{name}' is a system voice")
+        raise HTTPException(status_code=404, detail=f"Voice '{name}' not found")
+
+    removed = []
+    for suffix in (
+        ".embed.npy",
+        ".prompt.embed.npy",
+        ".prompt.cond.npy",
+        ".prompt.decode_context.npy",
+        ".lm_prefix.npz",
+        ".npy",
+        ".txt",
+        ".wav",
+        ".flac",
+        ".mp3",
+        ".ogg",
+        ".m4a",
+        ".aac",
+    ):
+        path = os.path.join(CUSTOM_VOICE_CACHE_DIR, f"{name}{suffix}")
+        if not os.path.exists(path):
+            continue
+        try:
+            os.unlink(path)
+            removed.append(os.path.basename(path))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to remove '{os.path.basename(path)}': {exc}",
+            ) from exc
+
+    removed.extend(remove_lm_prefix_caches(name))
+    VOICE_FEATURE_CACHE_MEMORY.pop((name, "reference"), None)
+    VOICE_FEATURE_CACHE_MEMORY.pop((name, "prompt"), None)
+    return {
+        "status": "success",
+        "message": f"Voice '{name}' deleted.",
+        "removed": removed,
     }
 
 
@@ -960,6 +1285,11 @@ async def health_check():
         "is_processing": is_processing,
         "current_job_id": CURRENT_JOB.job_id if is_processing else None,
         "model": "voxcpm2",
+        "lm_cache_length": get_lm_cache_length(),
+        "lm_prefix_cache_fingerprint": (
+            generator.lm_prefix_cache_fingerprint() if generator is not None else None
+        ),
+        "included_voice_cache_directories": VOICE_CACHE_DIRS,
     }
 
 
@@ -971,10 +1301,26 @@ def main():
         "--cache-dir", type=str, default=os.path.expanduser("~/.cache/ane_tts")
     )
     parser.add_argument(
+        "--included-voice-cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory containing bundled voice caches. Defaults to "
+            "<model-dir>/caches when present; otherwise downloads caches/* "
+            "from --repo-id."
+        ),
+    )
+    parser.add_argument(
         "--model-dir",
         type=str,
         default=None,
-        help="Local path to CoreML model directory. If not set, downloads from HuggingFace.",
+        help="Local path to CoreML model directory. If not set, downloads from --repo-id.",
+    )
+    parser.add_argument(
+        "--repo-id",
+        type=str,
+        default=REPO_ID,
+        help=f"Hugging Face model repo to download when --model-dir is omitted. Default: {REPO_ID}.",
     )
     parser.add_argument(
         "--embedding-path",
@@ -1050,21 +1396,22 @@ def main():
     parser.add_argument(
         "--vae-early-decode-steps",
         type=int,
-        default=0,
+        default=16,
         help=(
             "Number of initial AR steps where the VAE decoder runs immediately "
             "(one chunk per step) for low TTFB. After this many steps, "
-            "decoding switches to batch mode. 0 = always immediate (default)."
+            "decoding switches to batch mode. Default: 16. Use 0 to always "
+            "decode immediately."
         ),
     )
     parser.add_argument(
         "--vae-batch-decode-steps",
         type=int,
-        default=1,
+        default=4,
         help=(
             "Number of AR steps to accumulate before batch-decoding audio "
             "after the early-decode phase. Requires a RangeDim VAE decoder "
-            "model. 1 = no batching (default)."
+            "model. Default: 4. Use 1 to disable batching."
         ),
     )
     # New individual package paths
@@ -1133,6 +1480,8 @@ def main():
 
     load_model(
         model_dir=args.model_dir,
+        repo_id=args.repo_id,
+        included_voice_cache_dir=args.included_voice_cache_dir,
         embedding_path=args.embedding_path,
         lm_mode=args.lm_mode,
         lm_prefill_chunk_size=args.lm_prefill_chunk_size,
@@ -1153,6 +1502,7 @@ def main():
     )
 
     print(f"🚀 Starting VoxCPM2 server on {args.host}:{args.port}")
+    print(f"   Included voices: {VOICE_CACHE_DIR}")
     print(f"   Custom cache: {CUSTOM_VOICE_CACHE_DIR}")
     print(f"   Voices: {len(load_available_voices())}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

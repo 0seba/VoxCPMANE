@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import gc
+import hashlib
+import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Generator, Iterable
+from typing import Callable, Generator, Iterable, Sequence
 
 import coremltools as ct
 import numpy as np
@@ -212,8 +214,8 @@ class VoxCPM2Generator:
         lm_prefill_chunk_size: int | None = None,
         lm_async_decode_load: bool = False,
         lm_restrict_to_preload: bool = False,
-        vae_early_decode_steps: int = 0,
-        vae_batch_decode_steps: int = 1,
+        vae_early_decode_steps: int = 16,
+        vae_batch_decode_steps: int = 4,
     ):
         mdir = model_dir
         compiled_dir = (
@@ -373,6 +375,7 @@ class VoxCPM2Generator:
             projections_path,
             compute_units=proj_compute_units,
         )
+        self.lm_cache_length = self._resolve_lm_cache_length()
         if hasattr(self.base_lm, "model_path"):
             base_lm_resolved = self.base_lm.model_path
         elif hasattr(self.base_lm, "submodels"):
@@ -395,6 +398,47 @@ class VoxCPM2Generator:
             flush=True,
         )
 
+    def lm_prefix_cache_fingerprint(self) -> str:
+        """Return a stable key for LM prefix caches tied to active LM packages."""
+
+        def _model_cache_id(path: Path | None) -> str:
+            if path is None:
+                return "<unknown>"
+            path = Path(path)
+            name = path.name
+            for suffix in (".mlmodelc", ".mlpackage"):
+                if name.endswith(suffix):
+                    return name[: -len(suffix)]
+            return path.stem
+
+        def _lm_entries(lm: object) -> list[str]:
+            if hasattr(lm, "submodels"):
+                entries = []
+                for idx, submodel in enumerate(getattr(lm, "submodels")):
+                    entries.extend(f"{idx}:{item}" for item in _lm_entries(submodel))
+                return entries
+            path = getattr(lm, "model_path", None)
+            shapes = getattr(lm, "state_shapes", [])
+            cache_length = getattr(lm, "cache_length", None)
+            chunk_sizes = sorted(getattr(lm, "_function_names_by_chunk_size", {}))
+            return [
+                _model_cache_id(Path(path) if path is not None else None),
+                f"cache_length={cache_length}",
+                "chunk_sizes=" + ",".join(str(size) for size in chunk_sizes),
+                "states="
+                + ";".join(f"{name}:{tuple(shape)}" for name, shape in shapes),
+            ]
+
+        payload = {
+            "version": 1,
+            "base_lm": _lm_entries(self.base_lm),
+            "residual_lm": _lm_entries(self.residual_lm),
+            "base_prefill_chunk_size": self._base_lm_prefill_chunk_size,
+            "residual_prefill_chunk_size": self._residual_lm_prefill_chunk_size,
+        }
+        raw = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()[:16]
+
     @staticmethod
     def _resolve_prefill_chunk_size(lm: object, preferred: int | None) -> int | None:
         if preferred is None:
@@ -403,6 +447,28 @@ class VoxCPM2Generator:
         if isinstance(available, dict) and preferred in available:
             return preferred
         return getattr(lm, "chunk_size", preferred)
+
+    def _resolve_lm_cache_length(self) -> int | None:
+        lengths = [
+            getattr(lm, "cache_length", None) for lm in (self.base_lm, self.residual_lm)
+        ]
+        lengths = [int(length) for length in lengths if length is not None]
+        return min(lengths) if lengths else None
+
+    def _limit_max_len_to_cache(self, max_len: int, prefill_tokens: int) -> int:
+        max_len = int(max_len)
+        if max_len <= 0:
+            raise ValueError(f"max_len must be positive, got {max_len}")
+        if self.lm_cache_length is None:
+            return max_len
+
+        available = int(self.lm_cache_length) - int(prefill_tokens)
+        if available <= 0:
+            raise ValueError(
+                f"prompt uses {prefill_tokens} LM tokens, exceeding LM cache length "
+                f"{self.lm_cache_length}"
+            )
+        return min(max_len, available)
 
     def preload_tokenizer(self, hf_model_id: str = "openbmb/VoxCPM2") -> None:
         if not hasattr(self, "_tokenizer"):
@@ -551,16 +617,37 @@ class VoxCPM2Generator:
         reference_wav_path: str = "",
         prompt_audio_feat: np.ndarray | None = None,
         reference_audio_feat: np.ndarray | None = None,
+        prompt_audio_embed: np.ndarray | None = None,
+        reference_audio_embed: np.ndarray | None = None,
+        prompt_prefix_feat_cond: np.ndarray | None = None,
+        prompt_decode_context: np.ndarray | None = None,
+        lm_prefix_cache_path: str | Path | None = None,
+        lm_prefix_cache_read_paths: Sequence[str | Path] | None = None,
     ):
         """Build token/feature sequences and run LM prefill."""
         t_prefill = time.perf_counter()
+        t_stage = t_prefill
+        prefill_stage_seconds: dict[str, float] = {}
+
+        def mark_prefill_stage(name: str) -> None:
+            nonlocal t_stage
+            now = time.perf_counter()
+            prefill_stage_seconds[name] = now - t_stage
+            t_stage = now
+
         prompt_text = prompt_text or ""
         prompt_wav_path = (prompt_wav_path or "").strip()
         reference_wav_path = (reference_wav_path or "").strip()
 
-        has_prompt_audio = prompt_audio_feat is not None or bool(prompt_wav_path)
-        has_reference_audio = reference_audio_feat is not None or bool(
-            reference_wav_path
+        has_prompt_audio = (
+            prompt_audio_feat is not None
+            or prompt_audio_embed is not None
+            or bool(prompt_wav_path)
+        )
+        has_reference_audio = (
+            reference_audio_feat is not None
+            or reference_audio_embed is not None
+            or bool(reference_wav_path)
         )
         has_prompt_text = bool(prompt_text)
         text = (
@@ -572,12 +659,19 @@ class VoxCPM2Generator:
         text_token = self._encode_text(text)
         text_token = np.concatenate([text_token, [self.audio_start_token]])
         text_length = len(text_token)
+        mark_prefill_stage("text_tokens")
 
         if prompt_audio_feat is not None:
             prompt_feat = np.asarray(prompt_audio_feat, dtype=np.float32)
         elif prompt_wav_path:
             prompt_feat = self.vae_encoder.encode_wav(
                 prompt_wav_path, padding_mode="left"
+            )
+        elif prompt_audio_embed is not None:
+            prompt_embed_len = int(np.asarray(prompt_audio_embed).shape[0])
+            prompt_feat = np.zeros(
+                (prompt_embed_len, self.patch_size, self.latent_dim),
+                dtype=np.float32,
             )
         else:
             prompt_feat = np.empty(
@@ -589,6 +683,12 @@ class VoxCPM2Generator:
         elif reference_wav_path:
             ref_feat = self.vae_encoder.encode_wav(
                 reference_wav_path, padding_mode="right"
+            )
+        elif reference_audio_embed is not None:
+            reference_embed_len = int(np.asarray(reference_audio_embed).shape[0])
+            ref_feat = np.zeros(
+                (reference_embed_len, self.patch_size, self.latent_dim),
+                dtype=np.float32,
             )
         else:
             ref_feat = np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
@@ -603,14 +703,87 @@ class VoxCPM2Generator:
                     f"got {feat.shape}"
                 )
 
+        prompt_embed_cache = (
+            np.asarray(prompt_audio_embed, dtype=np.float32)
+            if prompt_audio_embed is not None
+            else None
+        )
+        reference_embed_cache = (
+            np.asarray(reference_audio_embed, dtype=np.float32)
+            if reference_audio_embed is not None
+            else None
+        )
+        prefix_feat_cond_override = (
+            np.asarray(prompt_prefix_feat_cond, dtype=np.float32)
+            if prompt_prefix_feat_cond is not None
+            else None
+        )
+        decode_context = (
+            np.asarray(prompt_decode_context, dtype=np.float32)
+            if prompt_decode_context is not None
+            else None
+        )
+        for name, embed, feat in (
+            ("prompt_audio_embed", prompt_embed_cache, prompt_feat),
+            ("reference_audio_embed", reference_embed_cache, ref_feat),
+        ):
+            if embed is None:
+                continue
+            expected = (feat.shape[0], self.hidden_size)
+            if embed.shape != expected:
+                raise ValueError(
+                    f"{name} must have shape {expected}, got {embed.shape}"
+                )
+        if prefix_feat_cond_override is not None:
+            if prefix_feat_cond_override.shape == (self.patch_size, self.latent_dim):
+                prefix_feat_cond_override = prefix_feat_cond_override.T.reshape(
+                    1, self.latent_dim, self.patch_size
+                )
+            elif prefix_feat_cond_override.shape == (self.latent_dim, self.patch_size):
+                prefix_feat_cond_override = prefix_feat_cond_override.reshape(
+                    1, self.latent_dim, self.patch_size
+                )
+            elif prefix_feat_cond_override.shape != (
+                1,
+                self.latent_dim,
+                self.patch_size,
+            ):
+                raise ValueError(
+                    "prompt_prefix_feat_cond must have shape "
+                    f"({self.patch_size}, {self.latent_dim}), "
+                    f"({self.latent_dim}, {self.patch_size}), or "
+                    f"(1, {self.latent_dim}, {self.patch_size}); "
+                    f"got {prefix_feat_cond_override.shape}"
+                )
+        if decode_context is not None:
+            if decode_context.ndim != 3:
+                raise ValueError(
+                    "prompt_decode_context must have shape "
+                    f"(N, {self.patch_size}, {self.latent_dim}) or "
+                    f"(N, {self.latent_dim}, {self.patch_size}); "
+                    f"got {decode_context.shape}"
+                )
+            if decode_context.shape[1:] == (self.latent_dim, self.patch_size):
+                decode_context = np.transpose(decode_context, (0, 2, 1))
+            elif decode_context.shape[1:] != (self.patch_size, self.latent_dim):
+                raise ValueError(
+                    "prompt_decode_context must have shape "
+                    f"(N, {self.patch_size}, {self.latent_dim}) or "
+                    f"(N, {self.latent_dim}, {self.patch_size}); "
+                    f"got {decode_context.shape}"
+                )
+        mark_prefill_stage("audio_features")
+
         text_pad_feat = np.zeros(
             (text_length, self.patch_size, self.latent_dim), dtype=np.float32
         )
 
+        lm_prefix_length = 0
         if has_reference_audio:
             ref_tokens, ref_feats, ref_text_mask, ref_feat_mask = self._make_ref_prefix(
                 ref_feat
             )
+            lm_prefix_length = len(ref_tokens)
             if has_prompt_audio:
                 prompt_audio_length = prompt_feat.shape[0]
                 prompt_pad_token = np.zeros(prompt_audio_length, dtype=np.int32)
@@ -673,14 +846,33 @@ class VoxCPM2Generator:
 
         text_mask = text_mask_1d.reshape(1, 1, 1, total_length)
         feat_mask = feat_mask_1d.reshape(1, 1, 1, total_length)
+        mark_prefill_stage("sequence_build")
 
         text_embed = self.embed_tokens[text_token] * self.scale_emb
         text_embed = text_embed.reshape(1, total_length, self.hidden_size).transpose(
             0, 2, 1
         )[:, :, None, :]
+        mark_prefill_stage("text_embed")
 
         feat_indices = np.nonzero(feat_mask_1d > 0.0)[0]
-        if len(feat_indices):
+        cached_audio_embeds = []
+        if has_reference_audio and reference_embed_cache is not None:
+            cached_audio_embeds.append(reference_embed_cache)
+        if has_prompt_audio and prompt_embed_cache is not None:
+            cached_audio_embeds.append(prompt_embed_cache)
+        cached_audio_embed = (
+            np.concatenate(cached_audio_embeds, axis=0) if cached_audio_embeds else None
+        )
+        if cached_audio_embed is not None and cached_audio_embed.shape == (
+            len(feat_indices),
+            self.hidden_size,
+        ):
+            feat_embed_tokens = np.zeros(
+                (1, total_length, self.hidden_size), dtype=np.float32
+            )
+            feat_embed_tokens[:, feat_indices, :] = cached_audio_embed
+            feat_embed = feat_embed_tokens.transpose(0, 2, 1)[:, :, None, :]
+        elif len(feat_indices):
             feat_input = audio_feat[feat_indices].reshape(
                 1, len(feat_indices), self.patch_size, self.latent_dim
             )
@@ -700,36 +892,74 @@ class VoxCPM2Generator:
             feat_embed = np.zeros(
                 (1, self.hidden_size, 1, total_length), dtype=np.float32
             )
+        mark_prefill_stage("feat_embed")
 
         combined = text_mask * text_embed + feat_mask * feat_embed
 
-        prefix_feat_cond = audio_feat[-1].T.reshape(1, self.latent_dim, self.patch_size)
+        if prefix_feat_cond_override is not None:
+            prefix_feat_cond = prefix_feat_cond_override
+        else:
+            prefix_feat_cond = audio_feat[-1].T.reshape(
+                1, self.latent_dim, self.patch_size
+            )
+        mark_prefill_stage("combine")
 
+        prefix_cache_path = Path(lm_prefix_cache_path) if lm_prefix_cache_path else None
+        prefix_cache_read_paths = [
+            Path(path) for path in (lm_prefix_cache_read_paths or ())
+        ]
+        if prefix_cache_path is not None and prefix_cache_path not in prefix_cache_read_paths:
+            prefix_cache_read_paths.append(prefix_cache_path)
+        use_prefix_cache = (
+            (prefix_cache_path is not None or bool(prefix_cache_read_paths))
+            and lm_prefix_length > 0
+            and lm_prefix_length < total_length
+        )
+        restored_prefix_cache = (
+            self._restore_lm_prefix_cache_from_paths(
+                prefix_cache_read_paths,
+                lm_prefix_length,
+            )
+            if use_prefix_cache
+            else False
+        )
+        mark_prefill_stage("lm_prefix_cache_restore")
+        run_start = lm_prefix_length if restored_prefix_cache else 0
+        combined_run = combined[..., run_start:]
         enc_outputs, _ = self.base_lm.forward(
-            combined,
+            combined_run,
             is_causal=True,
-            reset_state=True,
+            reset_state=not restored_prefix_cache,
             preferred_chunk_size=self._base_lm_prefill_chunk_size,
         )
+        mark_prefill_stage("base_lm")
 
-        if len(feat_indices):
+        run_feat_indices = feat_indices[feat_indices >= run_start] - run_start
+        if len(run_feat_indices):
             fsq_out = self._fsq(
-                enc_outputs[..., feat_indices],
+                enc_outputs[..., run_feat_indices],
                 preferred_chunk_size=256,
             )
             enc_outputs = enc_outputs.copy()
-            enc_outputs[..., feat_indices] = fsq_out
+            enc_outputs[..., run_feat_indices] = fsq_out
+        mark_prefill_stage("fsq")
         lm_hidden = enc_outputs[..., -1:]
 
-        feat_part = feat_mask * feat_embed
+        feat_part = (feat_mask * feat_embed)[..., run_start:]
         residual_input = np.concatenate([enc_outputs, feat_part], axis=1)
+        mark_prefill_stage("residual_prep")
         res_outputs, _ = self.residual_lm.forward(
             residual_input,
             is_causal=True,
-            reset_state=True,
+            reset_state=not restored_prefix_cache,
             preferred_chunk_size=self._residual_lm_prefill_chunk_size,
         )
         residual_hidden = res_outputs[..., -1:]
+        mark_prefill_stage("residual_lm")
+
+        if use_prefix_cache and not restored_prefix_cache and prefix_cache_path is not None:
+            self._save_lm_prefix_cache(prefix_cache_path, lm_prefix_length)
+        mark_prefill_stage("lm_prefix_cache_save")
 
         dt = time.perf_counter() - t_prefill
 
@@ -739,6 +969,14 @@ class VoxCPM2Generator:
             "prefix_feat_cond": prefix_feat_cond,
             "prefill_seconds": dt,
             "prefill_tokens": total_length,
+            "prefill_stage_seconds": prefill_stage_seconds,
+            "prefill_text_tokens": int(np.count_nonzero(text_mask_1d > 0.0)),
+            "prefill_audio_tokens": int(len(feat_indices)),
+            "prefill_reference_audio_tokens": int(ref_feat.shape[0]),
+            "prefill_prompt_audio_tokens": int(prompt_feat.shape[0]),
+            "prefill_lm_prefix_cache": bool(restored_prefix_cache),
+            "prefill_lm_prefix_tokens": int(lm_prefix_length if use_prefix_cache else 0),
+            "prompt_decode_context": decode_context,
         }
 
     def _make_ref_prefix(self, ref_feat: np.ndarray):
@@ -768,6 +1006,131 @@ class VoxCPM2Generator:
             ]
         )
         return tokens, feats, text_mask, feat_mask
+
+    def _warm_vae_decoder(self, decode_context: np.ndarray | None) -> None:
+        """Prime the streaming VAE decoder with prompt context and discard audio."""
+        self.vae_decoder.reset()
+        if decode_context is None:
+            return
+        context = np.asarray(decode_context, dtype=np.float32)
+        if context.size == 0:
+            return
+        for patch in context:
+            chunk = patch.T.reshape(1, self.latent_dim, self.patch_size)
+            self.vae_decoder.decode_chunk(chunk)
+
+    @staticmethod
+    def _encode_lm_snapshot(snapshot: dict, arrays: dict[str, np.ndarray], prefix: str):
+        kind = snapshot.get("kind")
+        if kind == "CoreMLMiniCPMLM":
+            encoded_arrays = []
+            for name, value in snapshot.get("arrays", {}).items():
+                key = f"{prefix}_{len(arrays)}"
+                arrays[key] = np.asarray(value, dtype=np.float16)
+                encoded_arrays.append({"name": name, "key": key})
+            return {
+                "kind": kind,
+                "position": int(snapshot["position"]),
+                "arrays": encoded_arrays,
+            }
+        if kind == "CoreMLMiniCPMLMChain":
+            return {
+                "kind": kind,
+                "position": int(snapshot["position"]),
+                "submodels": [
+                    VoxCPM2Generator._encode_lm_snapshot(
+                        sub_snapshot, arrays, f"{prefix}_part{idx}"
+                    )
+                    for idx, sub_snapshot in enumerate(snapshot.get("submodels", []))
+                ],
+            }
+        raise ValueError(f"unsupported LM snapshot kind: {kind!r}")
+
+    @staticmethod
+    def _decode_lm_snapshot(encoded: dict, arrays: dict[str, np.ndarray]) -> dict:
+        kind = encoded.get("kind")
+        if kind == "CoreMLMiniCPMLM":
+            return {
+                "kind": kind,
+                "position": int(encoded["position"]),
+                "arrays": {
+                    item["name"]: np.asarray(arrays[item["key"]], dtype=np.float16)
+                    for item in encoded.get("arrays", [])
+                },
+            }
+        if kind == "CoreMLMiniCPMLMChain":
+            return {
+                "kind": kind,
+                "position": int(encoded["position"]),
+                "submodels": [
+                    VoxCPM2Generator._decode_lm_snapshot(sub_snapshot, arrays)
+                    for sub_snapshot in encoded.get("submodels", [])
+                ],
+            }
+        raise ValueError(f"unsupported LM snapshot kind: {kind!r}")
+
+    def _save_lm_prefix_cache(self, cache_path: Path, prefix_length: int) -> None:
+        """Save base/residual LM KV prefix slices as float16."""
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            arrays: dict[str, np.ndarray] = {}
+            metadata = {
+                "version": 1,
+                "prefix_length": int(prefix_length),
+                "base_lm": self._encode_lm_snapshot(
+                    self.base_lm.snapshot_state_prefix(prefix_length),
+                    arrays,
+                    "base",
+                ),
+                "residual_lm": self._encode_lm_snapshot(
+                    self.residual_lm.snapshot_state_prefix(prefix_length),
+                    arrays,
+                    "residual",
+                ),
+            }
+            tmp_path = cache_path.with_name(cache_path.name + ".tmp.npz")
+            np.savez_compressed(
+                tmp_path,
+                __metadata__=np.array(json.dumps(metadata)),
+                **arrays,
+            )
+            tmp_path.replace(cache_path)
+        except Exception as exc:
+            print(f"⚠️  Failed to save LM prefix cache {cache_path}: {exc}", flush=True)
+
+    def _restore_lm_prefix_cache(self, cache_path: Path, prefix_length: int) -> bool:
+        """Restore base/residual LM KV prefix cache. Returns False on cache miss."""
+        if not cache_path.exists():
+            return False
+        try:
+            with np.load(cache_path, allow_pickle=False) as data:
+                metadata = json.loads(str(data["__metadata__"].item()))
+                if int(metadata.get("prefix_length", -1)) != int(prefix_length):
+                    return False
+                arrays = {key: data[key] for key in data.files if key != "__metadata__"}
+                self.base_lm.restore_state_prefix(
+                    self._decode_lm_snapshot(metadata["base_lm"], arrays)
+                )
+                self.residual_lm.restore_state_prefix(
+                    self._decode_lm_snapshot(metadata["residual_lm"], arrays)
+                )
+            return True
+        except Exception as exc:
+            print(
+                f"⚠️  Ignoring invalid LM prefix cache {cache_path}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def _restore_lm_prefix_cache_from_paths(
+        self,
+        cache_paths: Sequence[Path],
+        prefix_length: int,
+    ) -> bool:
+        for cache_path in cache_paths:
+            if self._restore_lm_prefix_cache(cache_path, prefix_length):
+                return True
+        return False
 
     def _swap_to_idle(self) -> None:
         """Reload the prefill function and unload the decode function."""
@@ -903,6 +1266,12 @@ class VoxCPM2Generator:
         prompt_wav_path: str = "",
         prompt_audio_feat: np.ndarray | None = None,
         reference_audio_feat: np.ndarray | None = None,
+        prompt_audio_embed: np.ndarray | None = None,
+        reference_audio_embed: np.ndarray | None = None,
+        prompt_prefix_feat_cond: np.ndarray | None = None,
+        prompt_decode_context: np.ndarray | None = None,
+        lm_prefix_cache_path: str | Path | None = None,
+        lm_prefix_cache_read_paths: Sequence[str | Path] | None = None,
         max_len: int = 256,
         min_len: int = 2,
         inference_timesteps: int = 10,
@@ -919,7 +1288,14 @@ class VoxCPM2Generator:
             reference_wav_path=reference_wav_path,
             prompt_audio_feat=prompt_audio_feat,
             reference_audio_feat=reference_audio_feat,
+            prompt_audio_embed=prompt_audio_embed,
+            reference_audio_embed=reference_audio_embed,
+            prompt_prefix_feat_cond=prompt_prefix_feat_cond,
+            prompt_decode_context=prompt_decode_context,
+            lm_prefix_cache_path=lm_prefix_cache_path,
+            lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
         )
+        max_len = self._limit_max_len_to_cache(max_len, state["prefill_tokens"])
         self._swap_to_decode()
 
         pred_feat_seq = []
@@ -939,7 +1315,7 @@ class VoxCPM2Generator:
         all_feats = np.concatenate(pred_feat_seq, axis=-1)
         latent = all_feats[0]
 
-        self.vae_decoder.reset()
+        self._warm_vae_decoder(state.get("prompt_decode_context"))
         upsample = self.vae_decode_chunk_size
         total_P = latent.shape[-1]
         audio_parts = []
@@ -960,6 +1336,12 @@ class VoxCPM2Generator:
         prompt_wav_path: str = "",
         prompt_audio_feat: np.ndarray | None = None,
         reference_audio_feat: np.ndarray | None = None,
+        prompt_audio_embed: np.ndarray | None = None,
+        reference_audio_embed: np.ndarray | None = None,
+        prompt_prefix_feat_cond: np.ndarray | None = None,
+        prompt_decode_context: np.ndarray | None = None,
+        lm_prefix_cache_path: str | Path | None = None,
+        lm_prefix_cache_read_paths: Sequence[str | Path] | None = None,
         max_len: int = 256,
         min_len: int = 2,
         inference_timesteps: int = 10,
@@ -977,7 +1359,14 @@ class VoxCPM2Generator:
             reference_wav_path=reference_wav_path,
             prompt_audio_feat=prompt_audio_feat,
             reference_audio_feat=reference_audio_feat,
+            prompt_audio_embed=prompt_audio_embed,
+            reference_audio_embed=reference_audio_embed,
+            prompt_prefix_feat_cond=prompt_prefix_feat_cond,
+            prompt_decode_context=prompt_decode_context,
+            lm_prefix_cache_path=lm_prefix_cache_path,
+            lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
         )
+        max_len = self._limit_max_len_to_cache(max_len, state["prefill_tokens"])
         prefill_done_at = time.perf_counter()
         if metrics_callback is not None:
             metrics_callback(
@@ -985,6 +1374,23 @@ class VoxCPM2Generator:
                 {
                     "prefill_seconds": float(state.get("prefill_seconds", 0.0)),
                     "prefill_tokens": int(state.get("prefill_tokens", 0)),
+                    "prefill_stage_seconds": dict(
+                        state.get("prefill_stage_seconds", {})
+                    ),
+                    "prefill_text_tokens": int(state.get("prefill_text_tokens", 0)),
+                    "prefill_audio_tokens": int(state.get("prefill_audio_tokens", 0)),
+                    "prefill_reference_audio_tokens": int(
+                        state.get("prefill_reference_audio_tokens", 0)
+                    ),
+                    "prefill_prompt_audio_tokens": int(
+                        state.get("prefill_prompt_audio_tokens", 0)
+                    ),
+                    "prefill_lm_prefix_cache": bool(
+                        state.get("prefill_lm_prefix_cache", False)
+                    ),
+                    "prefill_lm_prefix_tokens": int(
+                        state.get("prefill_lm_prefix_tokens", 0)
+                    ),
                     "at": prefill_done_at,
                 },
             )
@@ -1004,7 +1410,7 @@ class VoxCPM2Generator:
                 },
             )
 
-        self.vae_decoder.reset()
+        self._warm_vae_decoder(state.get("prompt_decode_context"))
 
         ar_step = 0
         pending_feats: list[np.ndarray] = []

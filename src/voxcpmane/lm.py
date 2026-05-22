@@ -115,6 +115,9 @@ class CoreMLMiniCPMLM:
             self.position_index_seed_shape = (
                 parse_shape_text(seed_desc["shape"]) if seed_desc is not None else None
             )
+            state_shapes = self._metadata_state_shapes(
+                fn_desc
+            ) or self._metadata_state_shapes(metadata)
         else:
             model_desc = self._description_for_function(spec, default_function_name)
             input_desc = model_desc.input
@@ -139,6 +142,10 @@ class CoreMLMiniCPMLM:
                 if seed_desc is not None
                 else None
             )
+            state_shapes = self._spec_state_shapes(spec)
+
+        self.state_shapes = list(state_shapes)
+        self.state_shape_by_name = {name: tuple(shape) for name, shape in state_shapes}
 
         if len(shape) != 4:
             raise ValueError(
@@ -150,6 +157,7 @@ class CoreMLMiniCPMLM:
                 "only single-batch rank-4 LM models are supported for now; "
                 f"got shape {shape}"
             )
+        self.cache_length = self._cache_length_from_state_shapes(state_shapes)
         self._models_by_chunk_size = {}
         self._function_names_by_chunk_size = {self.chunk_size: default_function_name}
         if metadata is not None:
@@ -214,6 +222,45 @@ class CoreMLMiniCPMLM:
         model = self._active_or_default_model()
         self.state = model.make_state()
         self.current_position = 0
+
+    def snapshot_state_prefix(self, prefix_length: int) -> dict:
+        """Read populated KV prefix state as float16 arrays."""
+        if self.state is None:
+            raise RuntimeError("cannot snapshot LM state before it has been created")
+        prefix_length = int(prefix_length)
+        arrays = {}
+        for name, shape in self.state_shapes:
+            value = np.asarray(self.state.read_state(name))
+            if value.ndim >= 3 and value.shape[2] >= prefix_length:
+                index = [slice(None)] * value.ndim
+                index[2] = slice(0, prefix_length)
+                value = value[tuple(index)]
+            arrays[name] = value.astype(np.float16, copy=False)
+        return {
+            "kind": "CoreMLMiniCPMLM",
+            "position": prefix_length,
+            "arrays": arrays,
+        }
+
+    def restore_state_prefix(self, snapshot: dict) -> None:
+        """Restore a float16 KV prefix snapshot into a fresh CoreML MLState."""
+        position = int(snapshot["position"])
+        model = self._active_or_default_model()
+        self.state = model.make_state()
+        for name, cached in snapshot["arrays"].items():
+            shape = self.state_shape_by_name.get(name)
+            if shape is None:
+                raise ValueError(f"state {name!r} is not present in this LM")
+            full = np.zeros(shape, dtype=np.float32)
+            cached_arr = np.asarray(cached, dtype=np.float32)
+            if cached_arr.ndim >= 3 and full.ndim >= 3:
+                index = [slice(None)] * full.ndim
+                index[2] = slice(0, cached_arr.shape[2])
+                full[tuple(index)] = cached_arr
+            else:
+                full[...] = cached_arr
+            self.state.write_state(name, full)
+        self.current_position = position
 
     def forward(
         self,
@@ -591,6 +638,44 @@ class CoreMLMiniCPMLM:
         )
 
     @staticmethod
+    def _metadata_state_shapes(metadata: dict) -> list[tuple[str, tuple[int, ...]]]:
+        for key in ("stateSchema", "states", "state"):
+            schema = metadata.get(key)
+            if isinstance(schema, list):
+                shapes = []
+                for item in schema:
+                    if not isinstance(item, dict) or not item.get("shape"):
+                        continue
+                    shape = item["shape"]
+                    if isinstance(shape, str):
+                        shape = parse_shape_text(shape)
+                    else:
+                        shape = tuple(int(d) for d in shape)
+                    shapes.append((item.get("name", ""), shape))
+                return shapes
+        return []
+
+    @staticmethod
+    def _spec_state_shapes(spec: Any) -> list[tuple[str, tuple[int, ...]]]:
+        shapes = []
+        for state in getattr(spec.description, "state", []):
+            array_type = state.type.stateType.arrayType
+            shapes.append((state.name, tuple(int(d) for d in array_type.shape)))
+        return shapes
+
+    @staticmethod
+    def _cache_length_from_state_shapes(
+        state_shapes: list[tuple[str, tuple[int, ...]]],
+    ) -> int | None:
+        lengths = [
+            int(shape[2])
+            for name, shape in state_shapes
+            if any(cache_name in name for cache_name in ("key_cache", "value_cache"))
+            and len(shape) >= 3
+        ]
+        return min(lengths) if lengths else None
+
+    @staticmethod
     def _to_numpy(x: Any) -> Tuple[np.ndarray, Callable[[np.ndarray], Any], int]:
         """Return ``(float32_numpy, restore_fn, original_rank)``."""
         if isinstance(x, np.ndarray):
@@ -688,6 +773,10 @@ class CoreMLMiniCPMLMChain:
         self.input_channels = shapes[0][1]
         self.spatial_dim = shapes[0][2]
         self.chunk_size = shapes[0][3]
+        self.cache_length = min(
+            (m.cache_length for m in self.submodels if m.cache_length is not None),
+            default=None,
+        )
         self._function_names_by_chunk_size = dict(
             self.submodels[0]._function_names_by_chunk_size
         )
@@ -699,6 +788,28 @@ class CoreMLMiniCPMLMChain:
         for submodel in self.submodels:
             submodel.reset()
         self.current_position = 0
+
+    def snapshot_state_prefix(self, prefix_length: int) -> dict:
+        prefix_length = int(prefix_length)
+        return {
+            "kind": "CoreMLMiniCPMLMChain",
+            "position": prefix_length,
+            "submodels": [
+                submodel.snapshot_state_prefix(prefix_length)
+                for submodel in self.submodels
+            ],
+        }
+
+    def restore_state_prefix(self, snapshot: dict) -> None:
+        sub_snapshots = snapshot.get("submodels", [])
+        if len(sub_snapshots) != len(self.submodels):
+            raise ValueError(
+                f"LM chain snapshot has {len(sub_snapshots)} parts, "
+                f"expected {len(self.submodels)}"
+            )
+        for submodel, sub_snapshot in zip(self.submodels, sub_snapshots):
+            submodel.restore_state_prefix(sub_snapshot)
+        self.current_position = int(snapshot["position"])
 
     def forward(
         self,

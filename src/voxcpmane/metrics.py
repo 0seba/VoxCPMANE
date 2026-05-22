@@ -20,6 +20,13 @@ class GenerationJob:
     created_at: float = field(default_factory=time.perf_counter)
     prefill_seconds: Optional[float] = None
     prefill_tokens: Optional[int] = None
+    prefill_stage_seconds: dict[str, float] = field(default_factory=dict)
+    prefill_text_tokens: Optional[int] = None
+    prefill_audio_tokens: Optional[int] = None
+    prefill_reference_audio_tokens: Optional[int] = None
+    prefill_prompt_audio_tokens: Optional[int] = None
+    prefill_lm_prefix_cache: Optional[bool] = None
+    prefill_lm_prefix_tokens: Optional[int] = None
     prefill_done_at: Optional[float] = None
     swap_to_decode_seconds: Optional[float] = None
     generation_started_at: Optional[float] = None
@@ -55,6 +62,71 @@ def _prefill_tokens_per_second(job: GenerationJob) -> Optional[float]:
     return job.prefill_tokens / job.prefill_seconds
 
 
+def _prefill_token_breakdown(job: GenerationJob) -> str:
+    if (
+        job.prefill_text_tokens is None
+        and job.prefill_audio_tokens is None
+        and job.prefill_reference_audio_tokens is None
+        and job.prefill_prompt_audio_tokens is None
+    ):
+        return ""
+    parts = [
+        f"text={job.prefill_text_tokens if job.prefill_text_tokens is not None else 'n/a'}",
+        f"audio={job.prefill_audio_tokens if job.prefill_audio_tokens is not None else 'n/a'}",
+        f"ref_audio={job.prefill_reference_audio_tokens if job.prefill_reference_audio_tokens is not None else 'n/a'}",
+        f"prompt_audio={job.prefill_prompt_audio_tokens if job.prefill_prompt_audio_tokens is not None else 'n/a'}",
+        f"total={job.prefill_tokens if job.prefill_tokens is not None else 'n/a'}",
+    ]
+    if job.prefill_lm_prefix_tokens:
+        cache_state = "hit" if job.prefill_lm_prefix_cache else "miss"
+        parts.append(f"lm_prefix_cache={cache_state}:{job.prefill_lm_prefix_tokens}")
+    return "tokens[" + " ".join(parts) + "]"
+
+
+def _prefill_stage_breakdown(job: GenerationJob) -> str:
+    if not job.prefill_stage_seconds:
+        return ""
+    stage_labels = (
+        ("text_tokens", "text"),
+        ("audio_features", "audio"),
+        ("sequence_build", "seq"),
+        ("text_embed", "text_emb"),
+        ("feat_embed", "feat_emb"),
+        ("combine", "combine"),
+        ("lm_prefix_cache_restore", "lm_cache_restore"),
+        ("base_lm", "base_lm"),
+        ("fsq", "fsq"),
+        ("residual_prep", "res_prep"),
+        ("residual_lm", "res_lm"),
+        ("lm_prefix_cache_save", "lm_cache_save"),
+    )
+    parts = [
+        f"{label}={_metric_value(job.prefill_stage_seconds[name])}"
+        for name, label in stage_labels
+        if name in job.prefill_stage_seconds
+    ]
+    extras = [
+        f"{name}={_metric_value(value)}"
+        for name, value in sorted(job.prefill_stage_seconds.items())
+        if name not in {stage_name for stage_name, _ in stage_labels}
+    ]
+    return "stages[" + " ".join(parts + extras) + "]"
+
+
+def _print_prefill_detail_metrics(job: GenerationJob) -> None:
+    details = [
+        detail
+        for detail in (_prefill_token_breakdown(job), _prefill_stage_breakdown(job))
+        if detail
+    ]
+    if not details:
+        return
+    print(
+        f"⏱ Job {job.job_id}: prefill_detail " + " ".join(details),
+        flush=True,
+    )
+
+
 def _print_first_byte_metrics(job: GenerationJob) -> None:
     _finish_live_rtf_line(job)
     rate = _prefill_tokens_per_second(job)
@@ -69,6 +141,7 @@ def _print_first_byte_metrics(job: GenerationJob) -> None:
         f"first_loop={_metric_value(job.first_loop_seconds)}",
         flush=True,
     )
+    _print_prefill_detail_metrics(job)
 
 
 def _print_final_metrics(job: GenerationJob, status: Optional[str] = None) -> None:
@@ -112,6 +185,7 @@ def _print_final_metrics(job: GenerationJob, status: Optional[str] = None) -> No
         f"inference={_metric_value(generation_seconds)}",
         flush=True,
     )
+    _print_prefill_detail_metrics(job)
     job.final_printed = True
 
 
@@ -120,6 +194,28 @@ def _handle_metric_event(job: GenerationJob, event: GenerationMetricEvent) -> No
     if event.kind == "prefill":
         job.prefill_seconds = float(values.get("prefill_seconds", 0.0))
         job.prefill_tokens = int(values.get("prefill_tokens", 0))
+        job.prefill_stage_seconds = {
+            str(name): float(seconds)
+            for name, seconds in values.get("prefill_stage_seconds", {}).items()
+        }
+        text_tokens = values.get("prefill_text_tokens")
+        audio_tokens = values.get("prefill_audio_tokens")
+        reference_audio_tokens = values.get("prefill_reference_audio_tokens")
+        prompt_audio_tokens = values.get("prefill_prompt_audio_tokens")
+        if text_tokens is not None:
+            job.prefill_text_tokens = int(text_tokens)
+        if audio_tokens is not None:
+            job.prefill_audio_tokens = int(audio_tokens)
+        if reference_audio_tokens is not None:
+            job.prefill_reference_audio_tokens = int(reference_audio_tokens)
+        if prompt_audio_tokens is not None:
+            job.prefill_prompt_audio_tokens = int(prompt_audio_tokens)
+        lm_prefix_cache = values.get("prefill_lm_prefix_cache")
+        lm_prefix_tokens = values.get("prefill_lm_prefix_tokens")
+        if lm_prefix_cache is not None:
+            job.prefill_lm_prefix_cache = bool(lm_prefix_cache)
+        if lm_prefix_tokens is not None:
+            job.prefill_lm_prefix_tokens = int(lm_prefix_tokens)
         job.prefill_done_at = float(values.get("at", time.perf_counter()))
     elif event.kind == "generation_start":
         job.generation_started_at = float(values.get("at", time.perf_counter()))
