@@ -29,6 +29,9 @@ dependencies = [
     "regex",
 ]
 
+[project.urls]
+Homepage = "https://github.com/0seba/VoxCPMANE"
+
 [project.scripts]
 voxcpmane2-server = "voxcpmane.server:main"
 
