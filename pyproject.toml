@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "VoxCPM2 TTS runtime + HTTP server for Apple Neural Engine"
 requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
+readme = "README.md"
+
 
 dependencies = [
     "coremltools==9.0",
