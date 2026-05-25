@@ -301,9 +301,9 @@ class VoxCPM2Generator:
                 if exc.name != "tokenizers":
                     raise
                 raise RuntimeError(
-                    "Text tokenization requires the optional 'tokenizer' extra: "
-                    "install voxcpmane2[tokenizer], or pass token IDs directly "
-                    "when using the benchmark path."
+                    "Text tokenization requires the required 'tokenizers' package; "
+                    "reinstall voxcpmane2, or pass token IDs directly when using "
+                    "the benchmark path."
                 ) from exc
 
             tokenizer_file = self.model_dir / "tokenizer.json"

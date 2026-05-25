@@ -1376,6 +1376,7 @@ dependencies = [
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "soxr" },
+    { name = "tokenizers" },
     { name = "tqdm" },
     { name = "uvicorn" },
 ]
@@ -1383,18 +1384,13 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "pydub" },
-    { name = "tokenizers" },
     { name = "wetext" },
 ]
 nogil = [
     { name = "pydub" },
-    { name = "tokenizers" },
 ]
 normalize = [
     { name = "wetext" },
-]
-tokenizer = [
-    { name = "tokenizers" },
 ]
 
 [package.metadata]
@@ -1414,15 +1410,13 @@ requires-dist = [
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "soxr", specifier = ">=1.0.0" },
-    { name = "tokenizers", marker = "extra == 'all'", specifier = ">=0.23.1" },
-    { name = "tokenizers", marker = "extra == 'nogil'", specifier = ">=0.23.1" },
-    { name = "tokenizers", marker = "extra == 'tokenizer'", specifier = ">=0.23.1" },
+    { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "tqdm" },
     { name = "uvicorn" },
     { name = "wetext", marker = "extra == 'all'" },
     { name = "wetext", marker = "extra == 'normalize'" },
 ]
-provides-extras = ["tokenizer", "normalize", "nogil", "all"]
+provides-extras = ["normalize", "nogil", "all"]
 
 [[package]]
 name = "wcwidth"

@@ -3,7 +3,7 @@
 Install the VoxCPM2 package:
 
 ```bash
-uv pip install -U 'voxcpmane2[tokenizer]'
+uv pip install -U voxcpmane2
 ```
 
 VoxCPMANE2 is the VoxCPM2 version of [VoxCPMANE](../VoxCPMANE). It provides a
@@ -32,16 +32,14 @@ by default.
 - `uv` or `pip`
 - CoreML runtime support through `coremltools`
 - Optional: `pydub` for `mp3`, `opus`, `ogg`, and `aac` responses
-- Optional: `voxcpmane2[tokenizer]` for text tokenization through
-  `tokenizers`
 - Optional: `voxcpmane2[normalize]` for `normalize=true` text normalization
 
 The async no-GIL branch requires free-threaded CPython `3.14t`, plus a locally
 patched CoreMLTools native bridge because official CoreMLTools wheels are not
 published for this Python ABI yet. Do not install `voxcpmane2[normalize]` in the
 `3.14t` environment unless you already have a compatible `kaldifst` build;
-`voxcpmane2[nogil]` installs the tokenizer and optional audio-format dependency
-without the normalization stack.
+`voxcpmane2[nogil]` installs the optional audio-format dependency without the
+normalization stack.
 
 ## Installation
 
@@ -50,19 +48,19 @@ without the normalization stack.
 Install with `uv`:
 
 ```bash
-uv pip install -U 'voxcpmane2[tokenizer]'
+uv pip install -U voxcpmane2
 ```
 
 Or install with `pip`:
 
 ```bash
-python -m pip install -U 'voxcpmane2[tokenizer]'
+python -m pip install -U voxcpmane2
 ```
 
 For editable development from a source checkout, run this from the repository:
 
 ```bash
-uv pip install -e '.[tokenizer]'
+uv pip install -e .
 ```
 
 ### Async No-GIL Branch
@@ -183,8 +181,8 @@ when setting up a machine from scratch.
 #### PyPI Extras And Installer Limits
 
 `voxcpmane2[nogil]` is a normal Python extra. It can request Python packages
-such as `tokenizers` and `pydub`, and if a no-GIL release is published to PyPI,
-installs such as the following count as `voxcpmane2` PyPI downloads:
+such as `pydub`, and if a no-GIL release is published to PyPI, installs such as
+the following count as `voxcpmane2` PyPI downloads:
 
 ```bash
 uv pip install --python .venv314t/bin/python 'voxcpmane2[nogil]'
@@ -437,8 +435,8 @@ uv run voxcpmane2-benchmark-overlap \
   --warmup-runs 1
 ```
 
-For a minimal Python 3.14t environment without the tokenizer extra, pass
-pre-tokenized IDs:
+Benchmarks can also bypass runtime text tokenization by passing pre-tokenized
+IDs:
 
 ```bash
 uv run --python cpython-3.14.2+freethreaded voxcpmane2-benchmark-overlap \

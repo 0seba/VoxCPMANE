@@ -27,21 +27,17 @@ dependencies = [
     "ftfy>=6.3.1",
     "inflect",
     "regex",
+    "tokenizers>=0.23.1",
 ]
 
 [project.optional-dependencies]
-tokenizer = [
-    "tokenizers>=0.23.1",
-]
 normalize = [
     "wetext",
 ]
 nogil = [
-    "tokenizers>=0.23.1",
     "pydub",
 ]
 all = [
-    "tokenizers>=0.23.1",
     "wetext",
     "pydub",
 ]
