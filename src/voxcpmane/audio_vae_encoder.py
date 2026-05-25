@@ -146,19 +146,48 @@ class AudioVAEEncoder:
             Float32 array of shape ``(num_patches, patch_size,
             latent_dim)``.
         """
+        chunks = list(self.iter_wav_patch_chunks(wav_path, padding_mode=padding_mode))
+        if not chunks:
+            return np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
+        return np.concatenate(chunks, axis=0)
+
+    def prepare_wav(
+        self,
+        wav_path: Path,
+        padding_mode: str = "right",
+    ) -> tuple[np.ndarray, int]:
+        """Load, resample, and pad audio for chunked VAE encoding."""
         audio, _ = load_audio(wav_path, target_sr=self.sample_rate, mono=True)
         audio = self._pad_to_patch_len(audio, padding_mode)
         target_patches = len(audio) // self.patch_len
+        return self._pad_to_chunk(audio), target_patches
 
-        audio = self._pad_to_chunk(audio)
-
+    def iter_padded_audio_patch_chunks(
+        self,
+        audio: np.ndarray,
+        target_patches: int,
+    ):
+        """Yield encoded patch chunks from already prepared/padded audio."""
         self.reset()
-        chunks = [
-            self.encode_patches_chunk(audio[start : start + self.chunk_samples])
-            for start in range(0, len(audio), self.chunk_samples)
-        ]
-        all_patches = np.concatenate(chunks, axis=0)
-        return all_patches[:target_patches]
+        emitted = 0
+        for start in range(0, len(audio), self.chunk_samples):
+            if emitted >= target_patches:
+                break
+            patches = self.encode_patches_chunk(audio[start : start + self.chunk_samples])
+            keep = min(int(target_patches) - emitted, patches.shape[0])
+            if keep <= 0:
+                break
+            emitted += keep
+            yield patches[:keep]
+
+    def iter_wav_patch_chunks(
+        self,
+        wav_path: Path,
+        padding_mode: str = "right",
+    ):
+        """Yield VoxCPM patch chunks while advancing the streaming VAE cache."""
+        audio, target_patches = self.prepare_wav(wav_path, padding_mode=padding_mode)
+        yield from self.iter_padded_audio_patch_chunks(audio, target_patches)
 
     # ------------------------------------------------------------------ #
     # padding helpers

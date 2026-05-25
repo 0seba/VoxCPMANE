@@ -42,7 +42,7 @@ from .metrics import (
     _update_live_rtf,
     _update_final_rtf,
     _print_final_rtf_summary,
-    _mark_first_byte,
+    _mark_first_response,
     _print_final_metrics,
 )
 import voxcpmane.metrics as metrics
@@ -289,10 +289,16 @@ def load_model(
     lm_mode: str = "hot-swap",
     lm_prefill_chunk_size: int | None = 128,
     lm_async_decode_load: bool = False,
+    lm_async_prefill_unload: bool = False,
     base_lm_splits: int = 2,
     compiled_fallback_dir: str | None = None,
+    prefill_audio_async: bool = False,
+    prefill_audio_queue_size: int = 2,
     vae_early_decode_steps: int = 16,
     vae_batch_decode_steps: int = 4,
+    vae_async_decode: bool = False,
+    vae_decode_max_pending: int = 2,
+    preload_tokenizer: bool = True,
     base_lm_path: list[str] | None = None,
     residual_lm_path: str | None = None,
     locdit_path: str | None = None,
@@ -361,8 +367,13 @@ def load_model(
     generator_model_dir = MODEL_PATH_PREFIX
     gen_kwargs = {
         "base_lm_splits": int(base_lm_splits),
+        "lm_async_prefill_unload": bool(lm_async_prefill_unload),
+        "prefill_audio_async": bool(prefill_audio_async),
+        "prefill_audio_queue_size": int(prefill_audio_queue_size),
         "vae_early_decode_steps": vae_early_decode_steps,
         "vae_batch_decode_steps": vae_batch_decode_steps,
+        "vae_async_decode": bool(vae_async_decode),
+        "vae_decode_max_pending": int(vae_decode_max_pending),
     }
     for kwarg, override_key, filenames in COMPONENT_PATH_SPECS:
         gen_kwargs[kwarg] = resolve_component_path(
@@ -405,7 +416,8 @@ def load_model(
 
     print("Loading CoreML models via VoxCPM2Generator...")
     generator = VoxCPM2Generator(pathlib.Path(generator_model_dir), **gen_kwargs)
-    generator.preload_tokenizer()
+    if preload_tokenizer:
+        generator.preload_tokenizer()
     print("✅ Models loaded successfully.")
 
 
@@ -443,6 +455,16 @@ def generation_worker():
                             flush=True,
                         )
                         break
+                    if chunk_count == 0:
+                        job.output_queue.put(
+                            GenerationMetricEvent(
+                                "first_audio_chunk",
+                                {
+                                    "at": time.perf_counter(),
+                                    "samples": int(chunk.shape[0]),
+                                },
+                            )
+                        )
                     job.output_queue.put(chunk)
                     chunk_count += 1
                 print(
@@ -950,7 +972,18 @@ def generate_audio_chunks(
     text = request.input
     if request.normalize:
         if text_normalizer is None:
-            from .text_normalize import TextNormalizer
+            try:
+                from .text_normalize import TextNormalizer
+            except ModuleNotFoundError as exc:
+                if exc.name != "wetext":
+                    raise
+                raise HTTPException(
+                    status_code=501,
+                    detail=(
+                        "Text normalization requires the optional 'normalize' "
+                        "extra: install voxcpmane2[normalize]."
+                    ),
+                ) from exc
 
             text_normalizer = TextNormalizer()
         text = text_normalizer.normalize(text)
@@ -1135,7 +1168,7 @@ async def create_speech(request: SpeechRequest):
 
     full_audio = np.concatenate(all_chunks)
     content, media_type = encode_audio_response(full_audio, audio_format)
-    _mark_first_byte(job)
+    _mark_first_response(job)
     if job.generation_seconds is not None:
         _print_final_metrics(job)
     return Response(content=content, media_type=media_type)
@@ -1152,7 +1185,7 @@ async def stream_speech(request: SpeechRequest):
                 on_metric=lambda event: _handle_metric_event(job, event),
             ):
                 payload = audio_float_to_int16(chunk).tobytes()
-                _mark_first_byte(job)
+                _mark_first_response(job)
                 record_audio_chunk(job, chunk)
                 yield payload
         finally:
@@ -1194,7 +1227,7 @@ async def playback_speech(request: SpeechRequest):
                     raise HTTPException(status_code=500, detail="Playback timeout")
                 chunk_count += 1
                 last_chunk = chunk
-                _mark_first_byte(job)
+                _mark_first_response(job)
                 record_audio_chunk(job, chunk)
                 await asyncio.to_thread(stream.write, chunk)
 
@@ -1442,6 +1475,33 @@ def main():
         ),
     )
     parser.add_argument(
+        "--lm-async-prefill-unload",
+        action="store_true",
+        default=False,
+        help=(
+            "Unload inactive prefill LM handles on a background thread after "
+            "decode handles are available. This targets preload mode, where "
+            "decode is already resident and prefill unload can overlap the "
+            "first decode loop work."
+        ),
+    )
+    parser.add_argument(
+        "--prefill-audio-async",
+        action="store_true",
+        default=False,
+        help=(
+            "For prompt/reference WAV inputs, stream AudioVAE encoder chunks "
+            "from a background thread while the main thread runs feature "
+            "encoder and BaseLM prefill over previous chunks."
+        ),
+    )
+    parser.add_argument(
+        "--prefill-audio-queue-size",
+        type=int,
+        default=2,
+        help="Maximum queued AudioVAE encoder chunks for --prefill-audio-async.",
+    )
+    parser.add_argument(
         "--base-lm-splits",
         type=int,
         default=2,
@@ -1490,6 +1550,24 @@ def main():
             "Number of AR steps to accumulate before batch-decoding audio "
             "after the early-decode phase. Requires a RangeDim VAE decoder "
             "model. Default: 4. Use 1 to disable batching."
+        ),
+    )
+    parser.add_argument(
+        "--vae-async-decode",
+        action="store_true",
+        default=False,
+        help=(
+            "Run streaming AudioVAE decoder calls on a background thread after "
+            "--vae-early-decode-steps so AR feature generation can run ahead."
+        ),
+    )
+    parser.add_argument(
+        "--vae-decode-max-pending",
+        type=int,
+        default=2,
+        help=(
+            "Maximum queued AudioVAE decoder calls for --vae-async-decode. "
+            "Higher values increase overlap and buffering."
         ),
     )
     parser.add_argument(

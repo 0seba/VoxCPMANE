@@ -29,14 +29,23 @@ class GenerationJob:
     prefill_lm_prefix_tokens: Optional[int] = None
     prefill_done_at: Optional[float] = None
     swap_to_decode_seconds: Optional[float] = None
+    decode_load_wait_seconds: Optional[float] = None
+    decode_load_wait_by_lm: dict[str, float] = field(default_factory=dict)
+    prefill_cleanup_wait_seconds: Optional[float] = None
     generation_started_at: Optional[float] = None
     generation_seconds: Optional[float] = None
     audio_seconds: Optional[float] = None
-    ttfb_seconds: Optional[float] = None
-    post_prefill_ttfb_seconds: Optional[float] = None
-    first_loop_seconds: Optional[float] = None
+    first_audio_chunk_at: Optional[float] = None
+    first_audio_chunk_samples: Optional[int] = None
+    model_ttfb_seconds: Optional[float] = None
+    post_prefill_model_ttfb_seconds: Optional[float] = None
+    first_model_loop_seconds: Optional[float] = None
+    first_ar_iteration_seconds: Optional[float] = None
+    http_ttfb_seconds: Optional[float] = None
+    post_prefill_http_ttfb_seconds: Optional[float] = None
+    first_http_loop_seconds: Optional[float] = None
     status: Optional[str] = None
-    first_byte_printed: bool = False
+    first_response_printed: bool = False
     final_printed: bool = False
     audio_samples_sent: int = 0
     inference_loops_sent: int = 0
@@ -113,10 +122,24 @@ def _prefill_stage_breakdown(job: GenerationJob) -> str:
     return "stages[" + " ".join(parts + extras) + "]"
 
 
+def _decode_wait_breakdown(job: GenerationJob) -> str:
+    if not job.decode_load_wait_by_lm:
+        return ""
+    parts = [
+        f"{name}={_metric_value(seconds)}"
+        for name, seconds in sorted(job.decode_load_wait_by_lm.items())
+    ]
+    return "decode_waits[" + " ".join(parts) + "]"
+
+
 def _print_prefill_detail_metrics(job: GenerationJob) -> None:
     details = [
         detail
-        for detail in (_prefill_token_breakdown(job), _prefill_stage_breakdown(job))
+        for detail in (
+            _prefill_token_breakdown(job),
+            _prefill_stage_breakdown(job),
+            _decode_wait_breakdown(job),
+        )
         if detail
     ]
     if not details:
@@ -127,18 +150,29 @@ def _print_prefill_detail_metrics(job: GenerationJob) -> None:
     )
 
 
-def _print_first_byte_metrics(job: GenerationJob) -> None:
+def _print_first_response_metrics(job: GenerationJob) -> None:
     _finish_live_rtf_line(job)
     rate = _prefill_tokens_per_second(job)
     rate_text = "n/a" if rate is None else f"{rate:.1f} tok/s"
+    server_queue_seconds = (
+        job.http_ttfb_seconds - job.model_ttfb_seconds
+        if job.http_ttfb_seconds is not None and job.model_ttfb_seconds is not None
+        else None
+    )
     print(
-        f"⏱ Job {job.job_id}: first_byte "
+        f"⏱ Job {job.job_id}: first_response "
         f"prefill={_metric_value(job.prefill_seconds)} "
         f"swap_to_decode={_metric_value(job.swap_to_decode_seconds)} "
+        f"decode_wait={_metric_value(job.decode_load_wait_seconds)} "
         f"prompt_tps={rate_text} "
-        f"ttfb={_metric_value(job.ttfb_seconds)} "
-        f"post_prefill_ttfb={_metric_value(job.post_prefill_ttfb_seconds)} "
-        f"first_loop={_metric_value(job.first_loop_seconds)}",
+        f"model_ttfb={_metric_value(job.model_ttfb_seconds)} "
+        f"http_ttfb={_metric_value(job.http_ttfb_seconds)} "
+        f"http_after_model={_metric_value(server_queue_seconds)} "
+        f"post_prefill_model={_metric_value(job.post_prefill_model_ttfb_seconds)} "
+        f"post_prefill_http={_metric_value(job.post_prefill_http_ttfb_seconds)} "
+        f"first_model_loop={_metric_value(job.first_model_loop_seconds)} "
+        f"first_ar_iter={_metric_value(job.first_ar_iteration_seconds)} "
+        f"first_http_loop={_metric_value(job.first_http_loop_seconds)}",
         flush=True,
     )
     _print_prefill_detail_metrics(job)
@@ -175,10 +209,16 @@ def _print_final_metrics(job: GenerationJob, status: Optional[str] = None) -> No
         f"⏱ Job {job.job_id}: {status_text} "
         f"prefill={_metric_value(job.prefill_seconds)} "
         f"swap_to_decode={_metric_value(job.swap_to_decode_seconds)} "
+        f"decode_wait={_metric_value(job.decode_load_wait_seconds)} "
+        f"prefill_unload_wait={_metric_value(job.prefill_cleanup_wait_seconds)} "
         f"prompt_tps={rate_text} "
-        f"ttfb={_metric_value(job.ttfb_seconds)} "
-        f"post_prefill_ttfb={_metric_value(job.post_prefill_ttfb_seconds)} "
-        f"first_loop={_metric_value(job.first_loop_seconds)} "
+        f"model_ttfb={_metric_value(job.model_ttfb_seconds)} "
+        f"http_ttfb={_metric_value(job.http_ttfb_seconds)} "
+        f"post_prefill_model={_metric_value(job.post_prefill_model_ttfb_seconds)} "
+        f"post_prefill_http={_metric_value(job.post_prefill_http_ttfb_seconds)} "
+        f"first_model_loop={_metric_value(job.first_model_loop_seconds)} "
+        f"first_ar_iter={_metric_value(job.first_ar_iteration_seconds)} "
+        f"first_http_loop={_metric_value(job.first_http_loop_seconds)} "
         f"rtf={rtf_text} "
         f"loop_period={loop_text} "
         f"audio={_metric_value(audio_seconds)} "
@@ -222,26 +262,64 @@ def _handle_metric_event(job: GenerationJob, event: GenerationMetricEvent) -> No
         swap_seconds = values.get("swap_to_decode_seconds")
         if swap_seconds is not None:
             job.swap_to_decode_seconds = float(swap_seconds)
+    elif event.kind == "decode_ready":
+        wait_seconds = values.get("decode_load_wait_seconds")
+        wait_by_lm = values.get("decode_load_wait_by_lm")
+        if isinstance(wait_by_lm, dict):
+            for name, seconds in wait_by_lm.items():
+                job.decode_load_wait_by_lm[str(name)] = float(seconds)
+            job.decode_load_wait_seconds = sum(job.decode_load_wait_by_lm.values())
+        elif wait_seconds is not None:
+            job.decode_load_wait_seconds = (
+                (job.decode_load_wait_seconds or 0.0) + float(wait_seconds)
+            )
+    elif event.kind == "prefill_cleanup":
+        wait_seconds = values.get("prefill_cleanup_wait_seconds")
+        if wait_seconds is not None:
+            job.prefill_cleanup_wait_seconds = float(wait_seconds)
+    elif event.kind == "first_audio_chunk":
+        if job.first_audio_chunk_at is None:
+            at = float(values.get("at", time.perf_counter()))
+            job.first_audio_chunk_at = at
+            samples = values.get("samples")
+            if samples is not None:
+                job.first_audio_chunk_samples = int(samples)
+            job.model_ttfb_seconds = at - job.created_at
+            if job.prefill_done_at is not None:
+                job.post_prefill_model_ttfb_seconds = at - job.prefill_done_at
+            if job.generation_started_at is not None:
+                job.first_model_loop_seconds = at - job.generation_started_at
+    elif event.kind == "first_ar_iteration":
+        seconds = values.get("first_ar_iteration_seconds")
+        if seconds is not None:
+            job.first_ar_iteration_seconds = float(seconds)
+        elif job.generation_started_at is not None:
+            at = float(values.get("at", time.perf_counter()))
+            job.first_ar_iteration_seconds = at - job.generation_started_at
     elif event.kind == "final":
         job.status = str(values.get("status", "completed"))
         job.generation_seconds = float(values.get("generation_seconds", 0.0))
         job.audio_seconds = float(values.get("audio_seconds", 0.0))
-        if job.ttfb_seconds is not None:
+        if job.http_ttfb_seconds is not None:
             _print_final_metrics(job)
 
 
-def _mark_first_byte(job: GenerationJob) -> None:
-    if job.first_byte_printed:
+def _mark_first_response(job: GenerationJob) -> None:
+    if job.first_response_printed:
         return
-    job.ttfb_seconds = time.perf_counter() - job.created_at
+    now = time.perf_counter()
+    job.http_ttfb_seconds = now - job.created_at
     if job.prefill_done_at is not None:
-        job.post_prefill_ttfb_seconds = time.perf_counter() - job.prefill_done_at
+        job.post_prefill_http_ttfb_seconds = now - job.prefill_done_at
     if job.generation_started_at is not None:
-        job.first_loop_seconds = time.perf_counter() - job.generation_started_at
-    _print_first_byte_metrics(job)
-    job.first_byte_printed = True
+        job.first_http_loop_seconds = now - job.generation_started_at
+    _print_first_response_metrics(job)
+    job.first_response_printed = True
     if job.generation_seconds is not None and not job.final_printed:
         _print_final_metrics(job)
+
+
+_mark_first_byte = _mark_first_response
 
 
 def _finish_live_rtf_line(job: GenerationJob) -> None:

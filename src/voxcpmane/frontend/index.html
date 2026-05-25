@@ -163,6 +163,16 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     </div>
                 </div>
 
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="flex flex-col">
+                        <label for="initial-stream-buffer" class="flex items-start text-sm font-medium text-gray-300 mb-2">
+                            Initial Stream Buffer (seconds)
+                        </label>
+                        <input type="number" id="initial-stream-buffer" value="0.00" min="0" max="3" step="0.05" class="w-full h-12 p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition">
+                        <div class="mt-1 text-xs text-gray-500">Use 0.00 to hear the first chunk as soon as the browser receives it.</div>
+                    </div>
+                </div>
+
                 <div class="flex flex-col sm:flex-row gap-4">
                     <button type="submit" id="play-button" class="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg hover:from-purple-700 hover:to-pink-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
                         <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
@@ -267,6 +277,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         const cfgValueInput = document.getElementById('cfg-value');
         const inferenceTimestepsInput = document.getElementById('inference-timesteps');
         const seedInput = document.getElementById('seed');
+        const initialStreamBufferInput = document.getElementById('initial-stream-buffer');
         
         // --- Audio Player Elements ---
         const audioPlayerContainer = document.getElementById('audio-player-container');
@@ -313,8 +324,8 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         let streamPlayerModuleUrl = null;
         let streamPlaybackPaused = false;
         let streamFinishTimer = null;
+        let streamTiming = null;
 
-        const INITIAL_STREAM_BUFFER_SECONDS = 0.6;
         const TARGET_SCHEDULE_AHEAD_SECONDS = 1.2;
         const RESTART_DELAY_SECONDS = 0.08;
         const FADE_SECONDS = 0.005;
@@ -469,6 +480,86 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
         }
         function hideStatus() {
             statusMessage.classList.add('hidden');
+        }
+
+        function formatTimingSeconds(ms) {
+            return `${(ms / 1000).toFixed(3)}s`;
+        }
+
+        function getInitialStreamBufferSeconds() {
+            const value = parseFloat(initialStreamBufferInput.value);
+            if (!Number.isFinite(value)) {
+                return 0.0;
+            }
+            return Math.max(0.0, value);
+        }
+
+        function startStreamTiming() {
+            streamTiming = {
+                requestStart: performance.now(),
+                responseHeaders: null,
+                firstByte: null,
+                playbackStart: null,
+            };
+        }
+
+        function elapsedFromRequest(timestamp) {
+            if (!streamTiming || timestamp === null) {
+                return 'n/a';
+            }
+            return formatTimingSeconds(timestamp - streamTiming.requestStart);
+        }
+
+        function logStreamTiming(label) {
+            if (!streamTiming) {
+                return;
+            }
+            const timings = {
+                headers: elapsedFromRequest(streamTiming.responseHeaders),
+                firstByte: elapsedFromRequest(streamTiming.firstByte),
+                playbackStart: elapsedFromRequest(streamTiming.playbackStart),
+                browserBuffer:
+                    streamTiming.firstByte !== null && streamTiming.playbackStart !== null
+                        ? formatTimingSeconds(streamTiming.playbackStart - streamTiming.firstByte)
+                        : 'n/a',
+            };
+            console.log(`Stream timing (${label})`, timings);
+        }
+
+        function markStreamResponseHeaders() {
+            if (!streamTiming || streamTiming.responseHeaders !== null) {
+                return;
+            }
+            streamTiming.responseHeaders = performance.now();
+            logStreamTiming('headers');
+        }
+
+        function markStreamFirstByte() {
+            if (!streamTiming || streamTiming.firstByte !== null) {
+                return;
+            }
+            streamTiming.firstByte = performance.now();
+            logStreamTiming('first byte');
+            showStatus(
+                `First stream byte in ${elapsedFromRequest(streamTiming.firstByte)}. Buffering audio before playback.`,
+                'info'
+            );
+        }
+
+        function markStreamPlaybackStart(extraDelayMs = 0) {
+            if (!streamTiming || streamTiming.playbackStart !== null) {
+                return;
+            }
+            streamTiming.playbackStart = performance.now() + extraDelayMs;
+            logStreamTiming('playback start');
+            const bufferDelay =
+                streamTiming.firstByte !== null
+                    ? formatTimingSeconds(streamTiming.playbackStart - streamTiming.firstByte)
+                    : 'n/a';
+            showStatus(
+                `Playback started in ${elapsedFromRequest(streamTiming.playbackStart)}. First byte ${elapsedFromRequest(streamTiming.firstByte)}, browser buffer ${bufferDelay}.`,
+                'success'
+            );
         }
         
         // --- UI State Management ---
@@ -821,6 +912,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             pendingSamples = new Float32Array(0);
             streamPlayerEndSent = false;
             streamPlaybackPaused = false;
+            streamTiming = null;
             clearStreamFinishTimer();
             pausePlaybackButton.textContent = 'Pause Playback';
         }
@@ -903,13 +995,14 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
 
             if (!playbackStarted) {
-                if (!streamEnded && queuedAudioDuration < INITIAL_STREAM_BUFFER_SECONDS) {
+                if (!streamEnded && queuedAudioDuration < getInitialStreamBufferSeconds()) {
                     playButtonText.textContent = 'Buffering...';
                     return;
                 }
                 playbackStarted = true;
                 nextStartTime = audioContext.currentTime + RESTART_DELAY_SECONDS;
                 playButtonText.textContent = 'Playing...';
+                markStreamPlaybackStart(RESTART_DELAY_SECONDS * 1000);
             }
 
             if (nextStartTime < audioContext.currentTime) {
@@ -951,13 +1044,14 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
             }
 
             if (!playbackStarted) {
-                if (!streamEnded && queuedAudioDuration < INITIAL_STREAM_BUFFER_SECONDS) {
+                if (!streamEnded && queuedAudioDuration < getInitialStreamBufferSeconds()) {
                     playButtonText.textContent = 'Buffering...';
                     return;
                 }
                 playbackStarted = true;
                 playButtonText.textContent = 'Playing...';
                 streamPlayerNode.port.postMessage({ type: 'start' });
+                markStreamPlaybackStart();
             } else if (!streamEnded) {
                 playButtonText.textContent = 'Playing...';
             }
@@ -1131,6 +1225,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
 
             try {
                 const requestBody = buildSpeechRequestBody('pcm');
+                startStreamTiming();
 
                 const response = await fetch('/v1/audio/speech/stream', {
                     method: 'POST',
@@ -1145,6 +1240,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     const errorBody = await response.json();
                     throw new Error(errorBody.detail || `Server error: ${response.status}`);
                 }
+                markStreamResponseHeaders();
 
                 const headerSampleRate = response.headers.get('X-Sample-Rate');
                 if (headerSampleRate) {
@@ -1318,6 +1414,7 @@ You think you can just waltz in here and cause chaos? Well, I've got news for yo
                     return;
                 }
 
+                markStreamFirstByte();
                 const pcm32Data = pcmBytesToFloat32(value);
 
                 if (pcm32Data) {

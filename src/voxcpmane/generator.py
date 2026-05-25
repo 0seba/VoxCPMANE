@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import queue
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -74,11 +75,17 @@ class VoxCPM2Generator:
         proj_compute_units=ct.ComputeUnit.CPU_AND_NE,
         lm_prefill_chunk_size: int | None = None,
         lm_async_decode_load: bool = False,
+        lm_async_prefill_unload: bool = False,
         lm_restrict_to_preload: bool = False,
+        prefill_audio_async: bool = False,
+        prefill_audio_queue_size: int = 2,
         vae_early_decode_steps: int = 16,
         vae_batch_decode_steps: int = 4,
+        vae_async_decode: bool = False,
+        vae_decode_max_pending: int = 2,
     ):
         mdir = model_dir
+        self.model_dir = mdir
         compiled_dir = (
             compiled_fallback_dir.resolve()
             if compiled_fallback_dir is not None
@@ -108,8 +115,13 @@ class VoxCPM2Generator:
         self._base_lm_prefill_chunk_size = self.lm_prefill_chunk_size
         self._residual_lm_prefill_chunk_size = self.lm_prefill_chunk_size
         self.lm_async_decode_load = bool(lm_async_decode_load)
+        self.lm_async_prefill_unload = bool(lm_async_prefill_unload)
         self._decode_load_executor: ThreadPoolExecutor | None = None
-        self._decode_load_future: Future | None = None
+        self._decode_load_futures: dict[str, Future] = {}
+        self._prefill_cleanup_executor: ThreadPoolExecutor | None = None
+        self._prefill_cleanup_future: Future | None = None
+        self.prefill_audio_async = bool(prefill_audio_async)
+        self.prefill_audio_queue_size = max(1, int(prefill_audio_queue_size))
 
         def _model_path(
             override: Path | None, filename: str, *, use_compiled: bool = True
@@ -213,6 +225,8 @@ class VoxCPM2Generator:
         )
         self.vae_early_decode_steps = int(vae_early_decode_steps)
         self.vae_batch_decode_steps = max(1, int(vae_batch_decode_steps))
+        self.vae_async_decode = bool(vae_async_decode)
+        self.vae_decode_max_pending = max(1, int(vae_decode_max_pending))
 
         fsq_path = _model_path(fsq_model_path, "fsq_s4.mlpackage")
         projections_path = _model_path(projections_model_path, "projections.mlpackage")
@@ -281,18 +295,26 @@ class VoxCPM2Generator:
 
     def preload_tokenizer(self, hf_model_id: str = "openbmb/VoxCPM2") -> None:
         if not hasattr(self, "_tokenizer"):
-            from transformers import LlamaTokenizerFast
-
             try:
-                self._tokenizer = LlamaTokenizerFast.from_pretrained(
-                    hf_model_id,
-                    local_files_only=True,
-                )
-            except Exception:
-                self._tokenizer = LlamaTokenizerFast.from_pretrained(hf_model_id)
+                from tokenizers import Tokenizer
+            except ModuleNotFoundError as exc:
+                if exc.name != "tokenizers":
+                    raise
+                raise RuntimeError(
+                    "Text tokenization requires the optional 'tokenizer' extra: "
+                    "install voxcpmane2[tokenizer], or pass token IDs directly "
+                    "when using the benchmark path."
+                ) from exc
+
+            tokenizer_file = self.model_dir / "tokenizer.json"
+            if tokenizer_file.exists():
+                self._tokenizer = Tokenizer.from_file(str(tokenizer_file))
+            else:
+                self._tokenizer = Tokenizer.from_pretrained(hf_model_id)
+
             self._multichar_chinese_tokens = {
                 token
-                for token in self._tokenizer.vocab.keys()
+                for token in self._tokenizer.get_vocab().keys()
                 if len(token) >= 2 and all("\u4e00" <= c <= "\u9fff" for c in token)
             }
 
@@ -301,15 +323,57 @@ class VoxCPM2Generator:
         if not hasattr(self, "_tokenizer"):
             self.preload_tokenizer()
         processed = []
-        for token in self._tokenizer.tokenize(text):
+        encoding = self._tokenizer.encode(text, add_special_tokens=False)
+        for token in encoding.tokens:
             clean_token = token.replace("▁", "")
             if clean_token in self._multichar_chinese_tokens:
                 processed.extend(list(clean_token))
             else:
                 processed.append(token)
-        return np.array(
-            self._tokenizer.convert_tokens_to_ids(processed), dtype=np.int32
-        )
+        token_ids = []
+        for token in processed:
+            token_id = self._tokenizer.token_to_id(token)
+            if token_id is None:
+                raise ValueError(f"tokenizer has no ID for token {token!r}")
+            token_ids.append(token_id)
+        return np.array(token_ids, dtype=np.int32)
+
+    @staticmethod
+    def _coerce_token_ids(token_ids: Sequence[int] | np.ndarray | None) -> np.ndarray | None:
+        if token_ids is None:
+            return None
+        ids = np.asarray(token_ids, dtype=np.int32).reshape(-1)
+        if ids.size == 0:
+            raise ValueError("token ID sequence must not be empty")
+        return ids
+
+    def _build_text_token_ids(
+        self,
+        *,
+        target_text: str,
+        prompt_text: str,
+        has_prompt_audio: bool,
+        has_prompt_text: bool,
+        target_token_ids: Sequence[int] | np.ndarray | None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None,
+    ) -> np.ndarray:
+        target_ids = self._coerce_token_ids(target_token_ids)
+        prompt_ids = self._coerce_token_ids(prompt_token_ids)
+        if target_ids is not None:
+            if has_prompt_audio and has_prompt_text:
+                if prompt_ids is None:
+                    prompt_ids = self._encode_text(prompt_text)
+                text_token = np.concatenate([prompt_ids, target_ids])
+            else:
+                text_token = target_ids
+        else:
+            text = (
+                prompt_text + target_text
+                if has_prompt_audio and has_prompt_text
+                else target_text
+            )
+            text_token = self._encode_text(text)
+        return np.concatenate([text_token, [self.audio_start_token]])
 
     @classmethod
     def from_voxcpm(cls, model, model_dir: Path, **kwargs) -> VoxCPM2Generator:
@@ -433,6 +497,164 @@ class VoxCPM2Generator:
             )
         return np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32)
 
+    def _make_audio_source(
+        self,
+        *,
+        name: str,
+        feature: np.ndarray | None,
+        wav_path: str,
+        embed: np.ndarray | None,
+        padding_mode: str,
+    ) -> dict:
+        if feature is not None:
+            feat = np.asarray(feature, dtype=np.float32)
+            return {
+                "name": name,
+                "kind": "feature",
+                "feature": feat,
+                "embed": self._embed_cache_or_none(name, embed, feat),
+                "count": int(feat.shape[0]),
+            }
+        if wav_path:
+            audio, target_patches = self.vae_encoder.prepare_wav(
+                Path(wav_path),
+                padding_mode=padding_mode,
+            )
+            return {
+                "name": name,
+                "kind": "wav",
+                "audio": audio,
+                "target_patches": int(target_patches),
+                "embed": None,
+                "count": int(target_patches),
+            }
+        if embed is not None:
+            embed_arr = np.asarray(embed, dtype=np.float32)
+            feat = np.zeros(
+                (int(embed_arr.shape[0]), self.patch_size, self.latent_dim),
+                dtype=np.float32,
+            )
+            return {
+                "name": name,
+                "kind": "feature",
+                "feature": feat,
+                "embed": self._embed_cache_or_none(name, embed_arr, feat),
+                "count": int(feat.shape[0]),
+            }
+        return {
+            "name": name,
+            "kind": "empty",
+            "feature": np.empty((0, self.patch_size, self.latent_dim), dtype=np.float32),
+            "embed": None,
+            "count": 0,
+        }
+
+    def _iter_wav_source_chunks(self, source: dict):
+        audio = np.asarray(source["audio"], dtype=np.float32)
+        target_patches = int(source["target_patches"])
+        if not self.prefill_audio_async:
+            yield from self.vae_encoder.iter_padded_audio_patch_chunks(
+                audio,
+                target_patches,
+            )
+            return
+
+        out_queue: queue.Queue = queue.Queue(maxsize=self.prefill_audio_queue_size)
+
+        def produce() -> None:
+            try:
+                for chunk in self.vae_encoder.iter_padded_audio_patch_chunks(
+                    audio,
+                    target_patches,
+                ):
+                    out_queue.put(chunk)
+            except BaseException as exc:
+                out_queue.put(exc)
+            finally:
+                out_queue.put(None)
+
+        with ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"vae-encode-{source['name']}",
+        ) as executor:
+            future = executor.submit(produce)
+            try:
+                while True:
+                    item = out_queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield item
+                future.result()
+            finally:
+                if not future.done():
+                    future.cancel()
+
+    def _iter_audio_feature_chunks(self, source: dict):
+        count = int(source["count"])
+        if count <= 0:
+            return
+        embed = source.get("embed")
+        if embed is not None:
+            embed_arr = np.asarray(embed, dtype=np.float32)
+            chunk_size = self._base_lm_prefill_chunk_size or self.input_seq_length
+            chunk_size = max(1, int(chunk_size))
+            for start in range(0, count, chunk_size):
+                end = min(start + chunk_size, count)
+                feat = np.zeros(
+                    (end - start, self.patch_size, self.latent_dim),
+                    dtype=np.float32,
+                )
+                yield feat, embed_arr[start:end]
+            return
+        if source["kind"] == "wav":
+            for feat in self._iter_wav_source_chunks(source):
+                yield np.asarray(feat, dtype=np.float32), None
+            return
+        feat = np.asarray(source["feature"], dtype=np.float32)
+        chunk_size = self._base_lm_prefill_chunk_size or feat.shape[0] or 1
+        chunk_size = max(1, int(chunk_size))
+        for start in range(0, feat.shape[0], chunk_size):
+            yield feat[start : start + chunk_size], None
+
+    def _text_prefill_block(self, tokens: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+        tokens = np.asarray(tokens, dtype=np.int32)
+        length = int(tokens.shape[0])
+        text_embed = self.embed_tokens[tokens] * self.scale_emb
+        combined = text_embed.reshape(1, length, self.hidden_size).transpose(0, 2, 1)
+        combined = combined[:, :, None, :].astype(np.float32, copy=False)
+        feat_part = np.zeros_like(combined, dtype=np.float32)
+        return combined, feat_part, False
+
+    def _audio_prefill_block(
+        self,
+        feat: np.ndarray,
+        embed: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
+        feat = np.asarray(feat, dtype=np.float32)
+        if feat.shape[0] == 0:
+            empty = np.zeros((1, self.hidden_size, 1, 0), dtype=np.float32)
+            return empty, empty, True
+        if embed is not None:
+            feat_embed_tokens = np.asarray(embed, dtype=np.float32).reshape(
+                1,
+                feat.shape[0],
+                self.hidden_size,
+            )
+        else:
+            feat_embed_tokens = self.feat_encoder.encode_patches(
+                feat.reshape(1, feat.shape[0], self.patch_size, self.latent_dim),
+                preferred_chunk_patches=getattr(
+                    self.feat_encoder,
+                    "prefill_chunk_patches",
+                    None,
+                ),
+            )
+        combined = feat_embed_tokens.transpose(0, 2, 1)[:, :, None, :]
+        combined = combined.astype(np.float32, copy=False)
+        return combined, combined, True
+
     def _embed_cache_or_none(
         self,
         name: str,
@@ -480,7 +702,7 @@ class VoxCPM2Generator:
             f"(N, {self.latent_dim}, {self.patch_size}); got {context.shape}"
         )
 
-    def _prefill(
+    def _prefill_streaming_audio(
         self,
         target_text: str,
         prompt_text: str = "",
@@ -494,8 +716,10 @@ class VoxCPM2Generator:
         prompt_decode_context: np.ndarray | None = None,
         lm_prefix_cache_path: str | Path | None = None,
         lm_prefix_cache_read_paths: Sequence[str | Path] | None = None,
+        target_token_ids: Sequence[int] | np.ndarray | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
     ):
-        """Build token/feature sequences and run LM prefill."""
+        """Prefill path that can overlap CPU VAE encoding with NE prefill work."""
         t_prefill = time.perf_counter()
         t_stage = t_prefill
         prefill_stage_seconds: dict[str, float] = {}
@@ -521,14 +745,305 @@ class VoxCPM2Generator:
             or bool(reference_wav_path)
         )
         has_prompt_text = bool(prompt_text)
-        text = (
-            prompt_text + target_text
-            if has_prompt_audio and has_prompt_text
-            else target_text
+        text_token = self._build_text_token_ids(
+            target_text=target_text,
+            prompt_text=prompt_text,
+            has_prompt_audio=has_prompt_audio,
+            has_prompt_text=has_prompt_text,
+            target_token_ids=target_token_ids,
+            prompt_token_ids=prompt_token_ids,
         )
+        text_length = len(text_token)
+        mark_prefill_stage("text_tokens")
 
-        text_token = self._encode_text(text)
-        text_token = np.concatenate([text_token, [self.audio_start_token]])
+        prompt_source = self._make_audio_source(
+            name="prompt_audio_embed",
+            feature=prompt_audio_feat,
+            wav_path=prompt_wav_path,
+            embed=prompt_audio_embed,
+            padding_mode="left",
+        )
+        ref_source = self._make_audio_source(
+            name="reference_audio_embed",
+            feature=reference_audio_feat,
+            wav_path=reference_wav_path,
+            embed=reference_audio_embed,
+            padding_mode="right",
+        )
+        prefix_feat_cond_override = self._coerce_prefix_feat_cond(
+            prompt_prefix_feat_cond
+        )
+        decode_context = self._coerce_decode_context(prompt_decode_context)
+        mark_prefill_stage("audio_features")
+
+        total_length = text_length
+        lm_prefix_length = 0
+        if has_reference_audio:
+            lm_prefix_length = int(ref_source["count"]) + 2
+            total_length += lm_prefix_length
+        if has_prompt_audio:
+            total_length += int(prompt_source["count"])
+        mark_prefill_stage("sequence_build")
+
+        prefix_cache_path = Path(lm_prefix_cache_path) if lm_prefix_cache_path else None
+        prefix_cache_read_paths = [
+            Path(path) for path in (lm_prefix_cache_read_paths or ())
+        ]
+        if prefix_cache_path is not None and prefix_cache_path not in prefix_cache_read_paths:
+            prefix_cache_read_paths.append(prefix_cache_path)
+        use_prefix_cache = (
+            (prefix_cache_path is not None or bool(prefix_cache_read_paths))
+            and lm_prefix_length > 0
+            and lm_prefix_length < total_length
+        )
+        restored_prefix_cache = (
+            self._restore_lm_prefix_cache_from_paths(
+                prefix_cache_read_paths,
+                lm_prefix_length,
+            )
+            if use_prefix_cache
+            else False
+        )
+        mark_prefill_stage("lm_prefix_cache_restore")
+
+        run_start = lm_prefix_length if restored_prefix_cache else 0
+        sequence_offset = 0
+        base_blocks: list[tuple[np.ndarray, np.ndarray]] = []
+        last_prompt_patch: np.ndarray | None = None
+        lm_hidden: np.ndarray | None = None
+        base_has_run = False
+        base_decode_load_started = False
+        prefill_chunk_size = int(
+            self._base_lm_prefill_chunk_size or self.input_seq_length
+        )
+        pending_combined: list[np.ndarray] = []
+        pending_feat_part: list[np.ndarray] = []
+        pending_audio_mask: list[np.ndarray] = []
+
+        def pending_length() -> int:
+            return sum(int(block.shape[-1]) for block in pending_combined)
+
+        def flush_pending(final: bool = False) -> None:
+            nonlocal base_decode_load_started, base_has_run, lm_hidden
+            total = pending_length()
+            if total <= 0:
+                return
+            flush_len = total if final else (total // prefill_chunk_size) * prefill_chunk_size
+            if flush_len <= 0:
+                return
+
+            combined_all = np.concatenate(pending_combined, axis=-1)
+            feat_part_all = np.concatenate(pending_feat_part, axis=-1)
+            audio_mask_all = np.concatenate(pending_audio_mask, axis=0)
+
+            combined = combined_all[..., :flush_len]
+            feat_part = feat_part_all[..., :flush_len]
+            audio_mask = audio_mask_all[:flush_len]
+            remainder = combined_all.shape[-1] - flush_len
+            pending_combined.clear()
+            pending_feat_part.clear()
+            pending_audio_mask.clear()
+            if remainder:
+                pending_combined.append(combined_all[..., flush_len:])
+                pending_feat_part.append(feat_part_all[..., flush_len:])
+                pending_audio_mask.append(audio_mask_all[flush_len:])
+
+            enc_outputs, _ = self.base_lm.forward(
+                combined,
+                is_causal=True,
+                reset_state=(not restored_prefix_cache and not base_has_run),
+                preferred_chunk_size=self._base_lm_prefill_chunk_size,
+            )
+            base_has_run = True
+            if final and not base_decode_load_started:
+                self._begin_lm_decode_ready("base_lm", self.base_lm)
+                base_decode_load_started = True
+            audio_indices = np.nonzero(audio_mask > 0.0)[0]
+            if len(audio_indices):
+                enc_for_residual = enc_outputs.copy()
+                fsq_out = self._fsq(
+                    enc_outputs[..., audio_indices],
+                    preferred_chunk_size=256,
+                )
+                enc_for_residual[..., audio_indices] = fsq_out
+            else:
+                enc_for_residual = enc_outputs
+            lm_hidden = enc_for_residual[..., -1:]
+            base_blocks.append((enc_for_residual, feat_part))
+
+        def consume_block(
+            combined: np.ndarray,
+            feat_part: np.ndarray,
+            is_audio: bool,
+        ) -> None:
+            nonlocal sequence_offset
+            block_len = int(combined.shape[-1])
+            if block_len == 0:
+                return
+            block_start = sequence_offset
+            block_end = block_start + block_len
+            sequence_offset = block_end
+            if block_end <= run_start:
+                return
+            if block_start < run_start:
+                keep_from = run_start - block_start
+                combined = combined[..., keep_from:]
+                feat_part = feat_part[..., keep_from:]
+                block_len = int(combined.shape[-1])
+            pending_combined.append(combined)
+            pending_feat_part.append(feat_part)
+            pending_audio_mask.append(
+                np.full(block_len, 1.0 if is_audio else 0.0, dtype=np.float32)
+            )
+            flush_pending(final=False)
+
+        if has_reference_audio:
+            start_token = np.array([self.ref_audio_start_token], dtype=np.int32)
+            consume_block(*self._text_prefill_block(start_token))
+            for feat_chunk, embed_chunk in self._iter_audio_feature_chunks(ref_source):
+                consume_block(*self._audio_prefill_block(feat_chunk, embed_chunk))
+            end_token = np.array([self.ref_audio_end_token], dtype=np.int32)
+            consume_block(*self._text_prefill_block(end_token))
+
+        consume_block(*self._text_prefill_block(text_token))
+
+        if has_prompt_audio:
+            for feat_chunk, embed_chunk in self._iter_audio_feature_chunks(prompt_source):
+                if feat_chunk.shape[0]:
+                    last_prompt_patch = feat_chunk[-1]
+                consume_block(*self._audio_prefill_block(feat_chunk, embed_chunk))
+
+        flush_pending(final=True)
+        mark_prefill_stage("stream_base_lm")
+        if not base_decode_load_started:
+            self._begin_lm_decode_ready("base_lm", self.base_lm)
+
+        residual_hidden: np.ndarray | None = None
+        first_residual_block = True
+        for enc_for_residual, feat_part in base_blocks:
+            residual_input = np.concatenate([enc_for_residual, feat_part], axis=1)
+            res_outputs, _ = self.residual_lm.forward(
+                residual_input,
+                is_causal=True,
+                reset_state=first_residual_block and not restored_prefix_cache,
+                preferred_chunk_size=self._residual_lm_prefill_chunk_size,
+            )
+            first_residual_block = False
+            residual_hidden = res_outputs[..., -1:]
+        mark_prefill_stage("residual_lm")
+        self._begin_lm_decode_ready("residual_lm", self.residual_lm)
+
+        if lm_hidden is None or residual_hidden is None:
+            raise RuntimeError("prefill produced no LM outputs")
+
+        if prefix_feat_cond_override is not None:
+            prefix_feat_cond = prefix_feat_cond_override
+        elif last_prompt_patch is not None:
+            prefix_feat_cond = last_prompt_patch.T.reshape(
+                1, self.latent_dim, self.patch_size
+            )
+        else:
+            prefix_feat_cond = np.zeros(
+                (1, self.latent_dim, self.patch_size),
+                dtype=np.float32,
+            )
+
+        if use_prefix_cache and not restored_prefix_cache and prefix_cache_path is not None:
+            self._save_lm_prefix_cache(prefix_cache_path, lm_prefix_length)
+        mark_prefill_stage("lm_prefix_cache_save")
+
+        dt = time.perf_counter() - t_prefill
+        return {
+            "lm_hidden": lm_hidden,
+            "residual_hidden": residual_hidden,
+            "prefix_feat_cond": prefix_feat_cond,
+            "prefill_seconds": dt,
+            "prefill_tokens": total_length,
+            "prefill_stage_seconds": prefill_stage_seconds,
+            "prefill_text_tokens": int(text_length + (2 if has_reference_audio else 0)),
+            "prefill_audio_tokens": int(
+                (ref_source["count"] if has_reference_audio else 0)
+                + (prompt_source["count"] if has_prompt_audio else 0)
+            ),
+            "prefill_reference_audio_tokens": int(
+                ref_source["count"] if has_reference_audio else 0
+            ),
+            "prefill_prompt_audio_tokens": int(
+                prompt_source["count"] if has_prompt_audio else 0
+            ),
+            "prefill_lm_prefix_cache": bool(restored_prefix_cache),
+            "prefill_lm_prefix_tokens": int(lm_prefix_length if use_prefix_cache else 0),
+            "prompt_decode_context": decode_context,
+        }
+
+    def _prefill(
+        self,
+        target_text: str,
+        prompt_text: str = "",
+        prompt_wav_path: str = "",
+        reference_wav_path: str = "",
+        prompt_audio_feat: np.ndarray | None = None,
+        reference_audio_feat: np.ndarray | None = None,
+        prompt_audio_embed: np.ndarray | None = None,
+        reference_audio_embed: np.ndarray | None = None,
+        prompt_prefix_feat_cond: np.ndarray | None = None,
+        prompt_decode_context: np.ndarray | None = None,
+        lm_prefix_cache_path: str | Path | None = None,
+        lm_prefix_cache_read_paths: Sequence[str | Path] | None = None,
+        target_token_ids: Sequence[int] | np.ndarray | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
+    ):
+        """Build token/feature sequences and run LM prefill."""
+        if self.prefill_audio_async and (prompt_wav_path or reference_wav_path):
+            return self._prefill_streaming_audio(
+                target_text=target_text,
+                prompt_text=prompt_text,
+                prompt_wav_path=prompt_wav_path,
+                reference_wav_path=reference_wav_path,
+                prompt_audio_feat=prompt_audio_feat,
+                reference_audio_feat=reference_audio_feat,
+                prompt_audio_embed=prompt_audio_embed,
+                reference_audio_embed=reference_audio_embed,
+                prompt_prefix_feat_cond=prompt_prefix_feat_cond,
+                prompt_decode_context=prompt_decode_context,
+                lm_prefix_cache_path=lm_prefix_cache_path,
+                lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
+                target_token_ids=target_token_ids,
+                prompt_token_ids=prompt_token_ids,
+            )
+        t_prefill = time.perf_counter()
+        t_stage = t_prefill
+        prefill_stage_seconds: dict[str, float] = {}
+
+        def mark_prefill_stage(name: str) -> None:
+            nonlocal t_stage
+            now = time.perf_counter()
+            prefill_stage_seconds[name] = now - t_stage
+            t_stage = now
+
+        prompt_text = prompt_text or ""
+        prompt_wav_path = (prompt_wav_path or "").strip()
+        reference_wav_path = (reference_wav_path or "").strip()
+
+        has_prompt_audio = (
+            prompt_audio_feat is not None
+            or prompt_audio_embed is not None
+            or bool(prompt_wav_path)
+        )
+        has_reference_audio = (
+            reference_audio_feat is not None
+            or reference_audio_embed is not None
+            or bool(reference_wav_path)
+        )
+        has_prompt_text = bool(prompt_text)
+        text_token = self._build_text_token_ids(
+            target_text=target_text,
+            prompt_text=prompt_text,
+            has_prompt_audio=has_prompt_audio,
+            has_prompt_text=has_prompt_text,
+            target_token_ids=target_token_ids,
+            prompt_token_ids=prompt_token_ids,
+        )
         text_length = len(text_token)
         mark_prefill_stage("text_tokens")
 
@@ -677,6 +1192,7 @@ class VoxCPM2Generator:
             preferred_chunk_size=self._base_lm_prefill_chunk_size,
         )
         mark_prefill_stage("base_lm")
+        self._begin_lm_decode_ready("base_lm", self.base_lm)
 
         run_feat_indices = feat_indices[feat_indices >= run_start] - run_start
         if len(run_feat_indices):
@@ -700,6 +1216,7 @@ class VoxCPM2Generator:
         )
         residual_hidden = res_outputs[..., -1:]
         mark_prefill_stage("residual_lm")
+        self._begin_lm_decode_ready("residual_lm", self.residual_lm)
 
         if use_prefix_cache and not restored_prefix_cache and prefix_cache_path is not None:
             self._save_lm_prefix_cache(prefix_cache_path, lm_prefix_length)
@@ -882,14 +1399,18 @@ class VoxCPM2Generator:
 
     def _swap_to_idle(self) -> None:
         """Reload the prefill function and unload the decode function."""
-        for name, lm in [("base_lm", self.base_lm), ("residual_lm", self.residual_lm)]:
+        def swap_lm_to_idle(name: str, lm: object) -> None:
+            if getattr(lm, "is_chain", False):
+                for idx, submodel in enumerate(getattr(lm, "submodels")):
+                    swap_lm_to_idle(f"{name}/part{idx}", submodel)
+                return
             if not hasattr(lm, "idle_prefill_chunk_size"):
-                continue
+                return
             if not getattr(lm, "unload_inactive_functions", False):
-                continue
+                return
             idle = lm.idle_prefill_chunk_size
             if idle is None:
-                continue
+                return
             unloaded = False
             if not getattr(lm, "keep_default_function_loaded", False):
                 lm._unload_function(
@@ -902,55 +1423,136 @@ class VoxCPM2Generator:
                 gc.collect()
             lm._model_for_chunk_size(idle, profile_prefix="idle")
 
+        for name, lm in self._iter_lms():
+            swap_lm_to_idle(name, lm)
+
     def _swap_to_decode(self) -> None:
         """Load the decode function and unload prefill."""
         self._ensure_decode_ready()
         self._cleanup_prefill_functions()
 
+    def _iter_lms(self):
+        return (("base_lm", self.base_lm), ("residual_lm", self.residual_lm))
+
+    @staticmethod
+    def _decode_chunk_size_for_lm(lm: object) -> int | None:
+        if not hasattr(lm, "chunk_size"):
+            return None
+        cs = int(lm.chunk_size)
+        function_names = getattr(lm, "_function_names_by_chunk_size", {})
+        if cs not in function_names and function_names:
+            cs = min(function_names)
+        return cs
+
+    def _ensure_lm_decode_ready(self, label: str, lm: object) -> None:
+        """Ensure one LM has its decode handle loaded."""
+        if getattr(lm, "is_chain", False):
+            for idx, submodel in enumerate(getattr(lm, "submodels")):
+                self._ensure_lm_decode_ready(f"{label}/part{idx}", submodel)
+            return
+        cs = self._decode_chunk_size_for_lm(lm)
+        if cs is None:
+            return
+        lm._model_for_chunk_size(cs, profile_prefix=f"decode/{label}")
+
+    def _begin_lm_decode_ready(self, label: str, lm: object) -> Future | None:
+        """Start one LM decode-handle load, optionally in the background."""
+        if not self.lm_async_decode_load:
+            return None
+        future = self._decode_load_futures.get(label)
+        if future is not None and not future.done():
+            return future
+        if future is not None and future.done():
+            return future
+        if self._decode_load_executor is None:
+            self._decode_load_executor = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="lm-decode-load",
+            )
+        future = self._decode_load_executor.submit(
+            self._ensure_lm_decode_ready,
+            label,
+            lm,
+        )
+        self._decode_load_futures[label] = future
+        return future
+
     def _ensure_decode_ready(self) -> None:
         """Ensure the decode function handle is loaded for both LMs."""
-        for name, lm in [("base_lm", self.base_lm), ("residual_lm", self.residual_lm)]:
-            if not hasattr(lm, "chunk_size"):
-                continue
-            cs = lm.chunk_size
-            if cs not in lm._function_names_by_chunk_size:
-                cs = min(lm._function_names_by_chunk_size)
-            lm._model_for_chunk_size(cs, profile_prefix="decode")
+        for name, lm in self._iter_lms():
+            self._ensure_lm_decode_ready(name, lm)
 
     def _begin_decode_ready(self) -> Future | None:
         """Start decode-handle loading, optionally on a background thread."""
         if not self.lm_async_decode_load:
             self._ensure_decode_ready()
             return None
-        if self._decode_load_executor is None:
-            self._decode_load_executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="lm-decode-load",
-            )
-        self._decode_load_future = self._decode_load_executor.submit(
-            self._ensure_decode_ready
-        )
-        return self._decode_load_future
+        futures = [
+            self._begin_lm_decode_ready(name, lm)
+            for name, lm in self._iter_lms()
+        ]
+        return next((future for future in futures if future is not None), None)
 
-    def _finish_decode_ready(self) -> float:
-        """Wait for a background decode load and return foreground wait time."""
-        future = self._decode_load_future
+    def _finish_decode_ready(self) -> dict[str, float]:
+        """Wait for background decode loads and return foreground wait time by LM."""
+        waits: dict[str, float] = {}
+        for label in list(self._decode_load_futures):
+            waits[label] = self._finish_lm_decode_ready(label)
+        return waits
+
+    def _finish_lm_decode_ready(self, label: str) -> float:
+        """Wait for one background decode load and return foreground wait time."""
+        future = self._decode_load_futures.get(label)
         if future is None:
             return 0.0
         t0 = time.perf_counter()
         try:
             future.result()
         finally:
-            self._decode_load_future = None
+            self._decode_load_futures.pop(label, None)
+        return time.perf_counter() - t0
+
+    def _begin_prefill_cleanup(self) -> Future | None:
+        """Unload inactive prefill handles, optionally in the background."""
+        future = self._prefill_cleanup_future
+        if future is not None and not future.done():
+            return future
+        if self.lm_async_prefill_unload:
+            if self._prefill_cleanup_executor is None:
+                self._prefill_cleanup_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="lm-prefill-unload",
+                )
+            self._prefill_cleanup_future = self._prefill_cleanup_executor.submit(
+                self._cleanup_prefill_functions
+            )
+            return self._prefill_cleanup_future
+        self._cleanup_prefill_functions()
+        return None
+
+    def _finish_prefill_cleanup(self) -> float:
+        """Wait for a background prefill unload and return foreground wait time."""
+        future = self._prefill_cleanup_future
+        if future is None:
+            return 0.0
+        t0 = time.perf_counter()
+        try:
+            future.result()
+        finally:
+            self._prefill_cleanup_future = None
         return time.perf_counter() - t0
 
     def _cleanup_prefill_functions(self) -> None:
         """Unload inactive LM function handles and run gc."""
-        for name, lm in [("base_lm", self.base_lm), ("residual_lm", self.residual_lm)]:
+        def cleanup_lm(name: str, lm: object) -> None:
+            if getattr(lm, "is_chain", False):
+                for idx, submodel in enumerate(getattr(lm, "submodels")):
+                    cleanup_lm(f"{name}/part{idx}", submodel)
+                return
             if not hasattr(lm, "chunk_size"):
-                continue
+                return
             if not getattr(lm, "unload_inactive_functions", False):
-                continue
+                return
             unloaded = False
             for loaded_size in list(getattr(lm, "_models_by_chunk_size", {})):
                 if loaded_size != lm.chunk_size:
@@ -962,6 +1564,9 @@ class VoxCPM2Generator:
             if unloaded:
                 gc.collect()
 
+        for name, lm in self._iter_lms():
+            cleanup_lm(name, lm)
+
     def _ar_loop(
         self,
         state: dict,
@@ -971,11 +1576,20 @@ class VoxCPM2Generator:
         inference_timesteps: int,
         cfg_value: float,
         rng: np.random.Generator,
+        decode_ready_callback: Callable[[str, float], None] | None = None,
+        iteration_callback: Callable[[str, dict], None] | None = None,
     ) -> Generator[np.ndarray, None, None]:
         """Core autoregressive loop yielding predicted features."""
         lm_hidden = state["lm_hidden"]
         residual_hidden = state["residual_hidden"]
         prefix_feat_cond = state["prefix_feat_cond"]
+        base_decode_ready = False
+        residual_decode_ready = False
+
+        def finish_decode(label: str) -> None:
+            wait_seconds = self._finish_lm_decode_ready(label)
+            if decode_ready_callback is not None:
+                decode_ready_callback(label, wait_seconds)
 
         for i in range(max_len):
             dit_hidden, stop_flag = self._projections(lm_hidden, residual_hidden)
@@ -1000,11 +1614,19 @@ class VoxCPM2Generator:
             curr_embed_nchw = curr_embed.transpose(0, 2, 1)[:, :, None, :]
             prefix_feat_cond = pred_feat
 
+            if not base_decode_ready:
+                finish_decode("base_lm")
+                base_decode_ready = True
             lm_hidden = self.base_lm.forward_step(curr_embed_nchw, None)
             lm_hidden = self._fsq(lm_hidden)
 
             residual_input = np.concatenate([lm_hidden, curr_embed_nchw], axis=1)
+            if not residual_decode_ready:
+                finish_decode("residual_lm")
+                residual_decode_ready = True
             residual_hidden = self.residual_lm.forward_step(residual_input, None)
+            if i == 0 and iteration_callback is not None:
+                iteration_callback("first_ar_iteration", {"at": time.perf_counter()})
 
     def generate(
         self,
@@ -1025,6 +1647,8 @@ class VoxCPM2Generator:
         inference_timesteps: int = 10,
         cfg_value: float = 2.0,
         seed: int | None = None,
+        target_token_ids: Sequence[int] | np.ndarray | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
     ) -> np.ndarray:
         """Generate audio from text plus optional reference voice."""
         chunks = list(
@@ -1046,6 +1670,8 @@ class VoxCPM2Generator:
                 inference_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
                 seed=seed,
+                target_token_ids=target_token_ids,
+                prompt_token_ids=prompt_token_ids,
             )
         )
         return np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float32)
@@ -1070,6 +1696,8 @@ class VoxCPM2Generator:
         cfg_value: float = 2.0,
         seed: int | None = None,
         metrics_callback: Callable[[str, dict], None] | None = None,
+        target_token_ids: Sequence[int] | np.ndarray | None = None,
+        prompt_token_ids: Sequence[int] | np.ndarray | None = None,
     ) -> Generator[np.ndarray, None, None]:
         """Like :meth:`generate`, but yields audio chunks during generation."""
         rng = np.random.default_rng(seed)
@@ -1087,6 +1715,8 @@ class VoxCPM2Generator:
             prompt_decode_context=prompt_decode_context,
             lm_prefix_cache_path=lm_prefix_cache_path,
             lm_prefix_cache_read_paths=lm_prefix_cache_read_paths,
+            target_token_ids=target_token_ids,
+            prompt_token_ids=prompt_token_ids,
         )
         max_len = self._limit_max_len_to_cache(max_len, state["prefill_tokens"])
         prefill_done_at = time.perf_counter()
@@ -1112,7 +1742,51 @@ class VoxCPM2Generator:
         generation_start = swap_done_at
         audio_samples = 0
         final_status = "completed"
-        prefill_cleanup_done = False
+        prefill_cleanup_started = False
+        if self.lm_async_prefill_unload and not self._decode_load_futures:
+            self._begin_prefill_cleanup()
+            prefill_cleanup_started = True
+
+        decode_ready_waits: dict[str, float] = {}
+        first_ar_iteration_reported = False
+
+        def mark_decode_ready(label: str, wait_seconds: float) -> None:
+            nonlocal prefill_cleanup_started
+            if label in decode_ready_waits:
+                return
+            decode_ready_waits[label] = float(wait_seconds)
+            if metrics_callback is not None:
+                metrics_callback(
+                    "decode_ready",
+                    {
+                        "at": time.perf_counter(),
+                        "decode_load_wait_seconds": float(wait_seconds),
+                        "decode_load_wait_by_lm": {label: float(wait_seconds)},
+                    },
+                )
+            if (
+                label == "residual_lm"
+                and not prefill_cleanup_started
+                and not self._decode_load_futures
+            ):
+                self._begin_prefill_cleanup()
+                prefill_cleanup_started = True
+
+        def mark_iteration(kind: str, values: dict) -> None:
+            nonlocal first_ar_iteration_reported
+            if kind != "first_ar_iteration" or first_ar_iteration_reported:
+                return
+            first_ar_iteration_reported = True
+            at = float(values.get("at", time.perf_counter()))
+            if metrics_callback is not None:
+                metrics_callback(
+                    "first_ar_iteration",
+                    {
+                        "at": at,
+                        "first_ar_iteration_seconds": at - generation_start,
+                    },
+                )
+
         if metrics_callback is not None:
             metrics_callback(
                 "generation_start",
@@ -1126,6 +1800,19 @@ class VoxCPM2Generator:
 
         ar_step = 0
         pending_feats: list[np.ndarray] = []
+        pending_vae_decodes: list[Future] = []
+        vae_decode_executor: ThreadPoolExecutor | None = None
+        first_audio_released = False
+
+        def prepare_audio_chunk_for_release(audio_chunk: np.ndarray) -> np.ndarray:
+            nonlocal audio_samples, first_audio_released
+            if not first_audio_released:
+                wait_seconds = self._finish_lm_decode_ready("base_lm")
+                mark_decode_ready("base_lm", wait_seconds)
+                first_audio_released = True
+            audio_samples += int(audio_chunk.shape[0])
+            return audio_chunk
+
         try:
             for pred_feat in self._ar_loop(
                 state,
@@ -1134,43 +1821,48 @@ class VoxCPM2Generator:
                 inference_timesteps=inference_timesteps,
                 cfg_value=cfg_value,
                 rng=rng,
+                decode_ready_callback=mark_decode_ready,
+                iteration_callback=mark_iteration,
             ):
                 ar_step += 1
 
-                if (
-                    ar_step <= self.vae_early_decode_steps
-                    or self.vae_batch_decode_steps <= 1
-                ):
-                    audio_chunk = self.vae_decoder.decode_chunk(pred_feat).reshape(-1)
-                    audio_samples += int(audio_chunk.shape[0])
-                    yield audio_chunk
-                else:
-                    pending_feats.append(pred_feat)
-                    if len(pending_feats) >= self.vae_batch_decode_steps:
-                        batch = np.concatenate(pending_feats, axis=-1)
-                        audio_chunk = self.vae_decoder.decode_batch(batch).reshape(-1)
-                        audio_samples += int(audio_chunk.shape[0])
-                        pending_feats = []
-                        yield audio_chunk
-
-                if not prefill_cleanup_done:
-                    prefill_cleanup_done = True
-                    decode_wait_seconds = self._finish_decode_ready()
-                    if metrics_callback is not None:
-                        metrics_callback(
-                            "decode_ready",
-                            {
-                                "at": time.perf_counter(),
-                                "decode_load_wait_seconds": decode_wait_seconds,
-                            },
+                if self.vae_async_decode and ar_step > self.vae_early_decode_steps:
+                    if vae_decode_executor is None:
+                        vae_decode_executor = ThreadPoolExecutor(
+                            max_workers=1,
+                            thread_name_prefix="vae-decode",
                         )
-                    self._cleanup_prefill_functions()
+                    pending_vae_decodes.append(
+                        vae_decode_executor.submit(
+                            self.vae_decoder.decode_chunk,
+                            pred_feat.copy(),
+                        )
+                    )
+                    if len(pending_vae_decodes) >= self.vae_decode_max_pending:
+                        audio_chunk = pending_vae_decodes.pop(0).result().reshape(-1)
+                        yield prepare_audio_chunk_for_release(audio_chunk)
+                else:
+                    if (
+                        ar_step <= self.vae_early_decode_steps
+                        or self.vae_batch_decode_steps <= 1
+                    ):
+                        audio_chunk = self.vae_decoder.decode_chunk(pred_feat).reshape(-1)
+                        yield prepare_audio_chunk_for_release(audio_chunk)
+                    else:
+                        pending_feats.append(pred_feat)
+                        if len(pending_feats) >= self.vae_batch_decode_steps:
+                            batch = np.concatenate(pending_feats, axis=-1)
+                            audio_chunk = self.vae_decoder.decode_batch(batch).reshape(-1)
+                            pending_feats = []
+                            yield prepare_audio_chunk_for_release(audio_chunk)
 
+            while pending_vae_decodes:
+                audio_chunk = pending_vae_decodes.pop(0).result().reshape(-1)
+                yield prepare_audio_chunk_for_release(audio_chunk)
             if pending_feats:
                 batch = np.concatenate(pending_feats, axis=-1)
                 audio_chunk = self.vae_decoder.decode_batch(batch).reshape(-1)
-                audio_samples += int(audio_chunk.shape[0])
-                yield audio_chunk
+                yield prepare_audio_chunk_for_release(audio_chunk)
         except GeneratorExit:
             final_status = "stopped"
         except Exception:
@@ -1187,6 +1879,20 @@ class VoxCPM2Generator:
                         / float(self.vae_out_sample_rate),
                     },
                 )
+            if self._decode_load_futures:
+                for label, wait_seconds in self._finish_decode_ready().items():
+                    mark_decode_ready(label, wait_seconds)
+            cleanup_wait_seconds = self._finish_prefill_cleanup()
+            if metrics_callback is not None and cleanup_wait_seconds > 0.0:
+                metrics_callback(
+                    "prefill_cleanup",
+                    {
+                        "at": time.perf_counter(),
+                        "prefill_cleanup_wait_seconds": cleanup_wait_seconds,
+                    },
+                )
+            if vae_decode_executor is not None:
+                vae_decode_executor.shutdown(wait=True, cancel_futures=True)
             self._swap_to_idle()
 
     def generate_to_file(

@@ -1,0 +1,44 @@
+diff --git a/coremlpython/CoreMLPythonArray.h b/coremlpython/CoreMLPythonArray.h
+index 2941207..1d88d46 100644
+--- a/coremlpython/CoreMLPythonArray.h
++++ b/coremlpython/CoreMLPythonArray.h
+@@ -36,7 +36,7 @@ namespace py = pybind11;
+ 
+ @interface PybindCompatibleArray : MLMultiArray {
+     // Holding reference to underlying memory
+-    py::array m_array;
++    PyObject *m_array;
+ }
+ 
+ - (PybindCompatibleArray *)initWithArray:(py::array)array;
+diff --git a/coremlpython/CoreMLPythonArray.mm b/coremlpython/CoreMLPythonArray.mm
+index d6374a6..c71e378 100644
+--- a/coremlpython/CoreMLPythonArray.mm
++++ b/coremlpython/CoreMLPythonArray.mm
+@@ -51,6 +51,7 @@
+ }
+ 
+ - (PybindCompatibleArray *)initWithArray:(py::array)array {
++    m_array = nullptr;
+ 
+     self = [super initWithDataPointer:array.mutable_data()
+                                 shape:[self.class shapeOf:array]
+@@ -60,9 +61,17 @@
+                                 error:nil];
+ 
+     if (self) {
+-        m_array = array;
++        m_array = array.ptr();
++        Py_XINCREF(m_array);
+     }
+     return self;
+ }
+ 
++- (void)dealloc {
++    PyGILState_STATE gil = PyGILState_Ensure();
++    Py_XDECREF(m_array);
++    m_array = nullptr;
++    PyGILState_Release(gil);
++}
++
+ @end

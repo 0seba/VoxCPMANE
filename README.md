@@ -3,7 +3,7 @@
 Install the VoxCPM2 package:
 
 ```bash
-uv pip install -U voxcpmane2
+uv pip install -U 'voxcpmane2[tokenizer]'
 ```
 
 VoxCPMANE2 is the VoxCPM2 version of [VoxCPMANE](../VoxCPMANE). It provides a
@@ -28,27 +28,186 @@ by default.
 ## Requirements
 
 - macOS on Apple Silicon
-- Python `>=3.10,<3.13`
+- Python `>=3.10,<3.15` for the normal GIL runtime
 - `uv` or `pip`
 - CoreML runtime support through `coremltools`
 - Optional: `pydub` for `mp3`, `opus`, `ogg`, and `aac` responses
+- Optional: `voxcpmane2[tokenizer]` for text tokenization through
+  `tokenizers`
+- Optional: `voxcpmane2[normalize]` for `normalize=true` text normalization
+
+The async no-GIL branch requires free-threaded CPython `3.14t`, plus a locally
+patched CoreMLTools native bridge because official CoreMLTools wheels are not
+published for this Python ABI yet. Do not install `voxcpmane2[normalize]` in the
+`3.14t` environment unless you already have a compatible `kaldifst` build;
+`voxcpmane2[nogil]` installs the tokenizer and optional audio-format dependency
+without the normalization stack.
 
 ## Installation
+
+### Normal PyPI Runtime
 
 Install with `uv`:
 
 ```bash
-uv pip install -U voxcpmane2
+uv pip install -U 'voxcpmane2[tokenizer]'
 ```
 
 Or install with `pip`:
 
 ```bash
-pip install -U voxcpmane2
+python -m pip install -U 'voxcpmane2[tokenizer]'
 ```
 
-For editable development from a source checkout, run `uv pip install -e .` from
-this directory.
+For editable development from a source checkout, run this from the repository:
+
+```bash
+uv pip install -e '.[tokenizer]'
+```
+
+### Async No-GIL Branch
+
+The async/no-GIL runtime lives on the `voxcpmane2-async-no-gil` branch. Install
+from a source checkout so the CoreMLTools patch under `patches/` is available.
+
+Clone the branch:
+
+```bash
+git clone --branch voxcpmane2-async-no-gil https://github.com/0seba/VoxCPMANE.git
+cd VoxCPMANE
+export VOXCPMANE2_DIR="$PWD"
+```
+
+#### Install With uv
+
+Create a free-threaded Python `3.14t` environment and install VoxCPMANE2:
+
+```bash
+uv python install cpython-3.14.2+freethreaded
+uv venv --python cpython-3.14.2+freethreaded .venv314t
+
+RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" \
+  uv pip install --python .venv314t/bin/python -e '.[nogil]'
+```
+
+#### Install With pip
+
+For pure `pip`, provide an existing free-threaded Python `3.14t` executable,
+then create the virtual environment and install VoxCPMANE2:
+
+```bash
+python3.14t -m venv .venv314t
+source .venv314t/bin/activate
+python -m pip install -U pip setuptools wheel cmake
+
+RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" \
+  python -m pip install -e '.[nogil]'
+```
+
+`pip` does not install Python itself; only the `uv` path above provisions the
+free-threaded interpreter.
+
+#### Build CoreMLTools For Python 3.14t
+
+Both installation paths need the same patched CoreMLTools native modules. Build
+them from CoreMLTools `9.0` and copy the native libraries into the `.venv314t`
+environment:
+
+```bash
+export PY314T="$VOXCPMANE2_DIR/.venv314t/bin/python"
+export COREMLTOOLS_SRC="/tmp/coremltools-9.0-cp314t"
+
+git clone --depth 1 --branch 9.0 https://github.com/apple/coremltools.git "$COREMLTOOLS_SRC"
+cd "$COREMLTOOLS_SRC"
+git apply "$VOXCPMANE2_DIR/patches/coremltools-9.0-py314t-array-lifetime.patch"
+
+"$PY314T" -m pip install -U setuptools wheel cmake
+PATH="$VOXCPMANE2_DIR/.venv314t/bin:$PATH" cmake -S . -B build-cp314t \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DPYTHON_EXECUTABLE="$PY314T" \
+  -DPYTHON_INCLUDE_DIR="$("$PY314T" -c 'import sysconfig; print(sysconfig.get_path("include"))')" \
+  -DPYTHON_INCLUDE_DIRS="$("$PY314T" -c 'import sysconfig; print(sysconfig.get_path("include"))')" \
+  -DPYTHON_LIBRARY="$("$PY314T" -c 'import sysconfig, pathlib; print(pathlib.Path(sysconfig.get_config_var("LIBDIR")) / sysconfig.get_config_var("LDLIBRARY"))')" \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cp314t --target coremlpython milstoragepython modelpackage --parallel
+
+SITE_PACKAGES="$("$PY314T" -c 'import site; print(site.getsitepackages()[0])')"
+cp coremltools/libcoremlpython.so \
+  coremltools/libmilstoragepython.so \
+  coremltools/libmodelpackage.so \
+  "$SITE_PACKAGES/coremltools/"
+```
+
+The patch keeps the NumPy-backed `MLMultiArray` owner alive and decrements its
+reference under the GIL. Without it, CoreML can release Python arrays from a
+worker thread and crash under free-threaded Python.
+
+Verify the install:
+
+```bash
+PYTHON_GIL=0 "$PY314T" -c "import sys, coremltools, tokenizers; print(sys.version); print('gil=', sys._is_gil_enabled())"
+PYTHON_GIL=0 "$VOXCPMANE2_DIR/.venv314t/bin/voxcpmane2-server" --help
+```
+
+Start the async hot-swap server:
+
+```bash
+cd "$VOXCPMANE2_DIR"
+PYTHON_GIL=0 .venv314t/bin/voxcpmane2-server \
+  --lm-mode hot-swap \
+  --lm-prefill-chunk-size 128 \
+  --lm-async-decode-load \
+  --lm-async-prefill-unload \
+  --prefill-audio-async \
+  --vae-async-decode \
+  --live-rtf final
+```
+
+Open `http://localhost:8000/` and set the playground's initial stream buffer to
+`0.00` to feel backend TTFB directly.
+
+#### Direct Git Install
+
+After the CoreMLTools native bridge is built, the branch can also be installed
+directly by URL:
+
+```bash
+RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" \
+  "$PY314T" -m pip install \
+  'voxcpmane2[nogil] @ git+https://github.com/0seba/VoxCPMANE.git@voxcpmane2-async-no-gil'
+```
+
+This direct install does not provide the local patch file, so use the clone path
+when setting up a machine from scratch.
+
+#### PyPI Extras And Installer Limits
+
+`voxcpmane2[nogil]` is a normal Python extra. It can request Python packages
+such as `tokenizers` and `pydub`, and if a no-GIL release is published to PyPI,
+installs such as the following count as `voxcpmane2` PyPI downloads:
+
+```bash
+uv pip install --python .venv314t/bin/python 'voxcpmane2[nogil]'
+python -m pip install 'voxcpmane2[nogil]'
+```
+
+Installing from GitHub with `voxcpmane2 @ git+https://...` does not count as a
+PyPI download for `voxcpmane2`; only packages actually downloaded from PyPI are
+counted by PyPI download analytics.
+
+Python packaging does not provide a safe pip/uv flag that both counts as a PyPI
+install and runs arbitrary post-install commands to patch, compile, and copy
+CoreMLTools native libraries. Extras can only declare dependencies. The practical
+options are:
+
+- publish this branch to PyPI as a pre-release or normal release, then document
+  the CoreMLTools build step above;
+- ship a helper console command in `voxcpmane2` that builds/copies the patched
+  CoreMLTools native modules, but users still run that command after install;
+- publish a separate patched CoreMLTools wheel when redistribution is acceptable.
+
+This branch uses the first approach and keeps CoreMLTools as an explicit local
+build step.
 
 ## Run The Server
 
@@ -253,6 +412,62 @@ VAE streaming latency can be tuned with:
 - `--vae-batch-decode-steps`: number of AR steps to batch after the early phase
 
 Defaults are `--vae-early-decode-steps 16` and `--vae-batch-decode-steps 4`.
+
+Experimental overlap flags are opt-in so baseline and async runs are comparable:
+
+- `--lm-async-decode-load`: in hot-swap mode, start decode handle loading in the
+  background as each LM finishes prefill, and wait only when decode is needed.
+- `--lm-async-prefill-unload`: unload inactive prefill handles on a background
+  thread, mainly for preload mode.
+- `--prefill-audio-async`: for prompt/reference WAV inputs, run AudioVAE encoder
+  chunk production on a background thread while feature encoder and BaseLM prefill
+  consume previous chunks.
+- `--vae-async-decode`: run AudioVAE decoder calls on a background thread after
+  `--vae-early-decode-steps`, bounded by `--vae-decode-max-pending`.
+
+Measure before and after on the same machine and model assets:
+
+```bash
+uv run voxcpmane2-benchmark-overlap \
+  --variant both \
+  --model-dir /path/to/local-models \
+  --voice af_alloy \
+  --lm-mode hot-swap \
+  --runs 3 \
+  --warmup-runs 1
+```
+
+For a minimal Python 3.14t environment without the tokenizer extra, pass
+pre-tokenized IDs:
+
+```bash
+uv run --python cpython-3.14.2+freethreaded voxcpmane2-benchmark-overlap \
+  --variant both \
+  --model-dir /path/to/local-models \
+  --token-ids 1,2,3,4,5 \
+  --runs 3 \
+  --warmup-runs 1
+```
+
+For a prompt/reference WAV case that exercises AudioVAE encoder overlap, pass
+`--reference-wav-path` or `--prompt-wav-path` instead of a cached `--voice`.
+
+Compare hot-swap under the same free-threaded Python with and without the GIL:
+
+```bash
+scripts/benchmark_gil_vs_nogil_hot_swap.py \
+  --runs 3 \
+  --warmup-runs 1 \
+  -- \
+  --model-dir /path/to/local-models \
+  --prompt-wav-path /path/to/prompt.wav \
+  --prompt-text "Transcript for the prompt WAV." \
+  --text "Text to synthesize."
+```
+
+The wrapper runs `voxcpmane2-benchmark-overlap` twice with identical hot-swap
+arguments, first with `PYTHON_GIL=1` and then with `PYTHON_GIL=0`, and writes raw
+logs plus `comparison.json` under `benchmarks/`.
 
 ## Acknowledgments
 
