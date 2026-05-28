@@ -5,7 +5,6 @@ from __future__ import annotations
 import gc
 import json
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Generator, Sequence
 
@@ -73,7 +72,6 @@ class VoxCPM2Generator:
         fsq_compute_units=ct.ComputeUnit.CPU_ONLY,
         proj_compute_units=ct.ComputeUnit.CPU_AND_NE,
         lm_prefill_chunk_size: int | None = None,
-        lm_async_decode_load: bool = False,
         lm_restrict_to_preload: bool = False,
         lm_startup_decode_warmup_repeats: int = 0,
         vae_early_decode_steps: int = 16,
@@ -108,9 +106,6 @@ class VoxCPM2Generator:
         )
         self._base_lm_prefill_chunk_size = self.lm_prefill_chunk_size
         self._residual_lm_prefill_chunk_size = self.lm_prefill_chunk_size
-        self.lm_async_decode_load = bool(lm_async_decode_load)
-        self._decode_load_executor: ThreadPoolExecutor | None = None
-        self._decode_load_future: Future | None = None
 
         def _model_path(
             override: Path | None, filename: str, *, use_compiled: bool = True
@@ -991,6 +986,8 @@ class VoxCPM2Generator:
             idle = lm.idle_prefill_chunk_size
             if idle is None:
                 continue
+            if hasattr(lm, "reset_position"):
+                lm.reset_position()
             unloaded = False
             if not getattr(lm, "keep_default_function_loaded", False):
                 lm._unload_function(
@@ -1017,33 +1014,6 @@ class VoxCPM2Generator:
             if cs not in lm._function_names_by_chunk_size:
                 cs = min(lm._function_names_by_chunk_size)
             lm._model_for_chunk_size(cs, profile_prefix="decode")
-
-    def _begin_decode_ready(self) -> Future | None:
-        """Start decode-handle loading, optionally on a background thread."""
-        if not self.lm_async_decode_load:
-            self._ensure_decode_ready()
-            return None
-        if self._decode_load_executor is None:
-            self._decode_load_executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="lm-decode-load",
-            )
-        self._decode_load_future = self._decode_load_executor.submit(
-            self._ensure_decode_ready
-        )
-        return self._decode_load_future
-
-    def _finish_decode_ready(self) -> float:
-        """Wait for a background decode load and return foreground wait time."""
-        future = self._decode_load_future
-        if future is None:
-            return 0.0
-        t0 = time.perf_counter()
-        try:
-            future.result()
-        finally:
-            self._decode_load_future = None
-        return time.perf_counter() - t0
 
     def _cleanup_prefill_functions(self) -> None:
         """Unload inactive LM function handles and run gc."""
@@ -1207,13 +1177,17 @@ class VoxCPM2Generator:
                     "at": prefill_done_at,
                 },
             )
-        self._begin_decode_ready()
+        self._swap_to_decode()
         swap_done_at = time.perf_counter()
         swap_to_decode_seconds = swap_done_at - prefill_done_at
-        generation_start = swap_done_at
         audio_samples = 0
         final_status = "completed"
-        prefill_cleanup_done = False
+
+        self._warm_vae_decoder(state.get("prompt_decode_context"))
+
+        ar_step = 0
+        pending_feats: list[np.ndarray] = []
+        generation_start = time.perf_counter()
         if metrics_callback is not None:
             metrics_callback(
                 "generation_start",
@@ -1222,11 +1196,6 @@ class VoxCPM2Generator:
                     "swap_to_decode_seconds": swap_to_decode_seconds,
                 },
             )
-
-        self._warm_vae_decoder(state.get("prompt_decode_context"))
-
-        ar_step = 0
-        pending_feats: list[np.ndarray] = []
         try:
             for pred_feat in self._ar_loop(
                 state,
@@ -1237,6 +1206,14 @@ class VoxCPM2Generator:
                 rng=rng,
             ):
                 ar_step += 1
+                if metrics_callback is not None:
+                    metrics_callback(
+                        "ar_loop",
+                        {
+                            "index": ar_step,
+                            "at": time.perf_counter(),
+                        },
+                    )
 
                 if (
                     ar_step <= self.vae_early_decode_steps
@@ -1254,24 +1231,13 @@ class VoxCPM2Generator:
                         pending_feats = []
                         yield audio_chunk
 
-                if not prefill_cleanup_done:
-                    prefill_cleanup_done = True
-                    decode_wait_seconds = self._finish_decode_ready()
-                    if metrics_callback is not None:
-                        metrics_callback(
-                            "decode_ready",
-                            {
-                                "at": time.perf_counter(),
-                                "decode_load_wait_seconds": decode_wait_seconds,
-                            },
-                        )
-                    self._cleanup_prefill_functions()
-
             if pending_feats:
                 batch = np.concatenate(pending_feats, axis=-1)
                 audio_chunk = self.vae_decoder.decode_batch(batch).reshape(-1)
                 audio_samples += int(audio_chunk.shape[0])
                 yield audio_chunk
+            if ar_step >= max_len:
+                final_status = "max_len"
         except GeneratorExit:
             final_status = "stopped"
         except Exception:

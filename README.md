@@ -74,6 +74,8 @@ starting the server, open `http://localhost:8000/` to generate speech with the
 included voices, test streaming behavior, use server-side playback, create
 custom voices, and switch between voice modes from the browser.
 
+![VoxCPMANE2 web playground](assets/voxcpmane_frontend.png)
+
 Common options:
 
 ```bash
@@ -94,26 +96,87 @@ under `caches/`.
 ## Working Modes
 
 `--lm-mode` controls how multifunction LM prefill and decode handles are kept in
-memory. The default prefill length is `128`. Available prefill lengths are `1`,
-`8`, `16`, `32`, `64`, and `128`; any of these can be used with
-`single-length` mode.
+memory. The default mode is fixed-length `16`, exposed as `single-length` with
+prefill/decode length `16`. Available prefill lengths are `1`, `8`, `16`, `32`,
+`64`, and `128`; any of these can be used with `single-length` mode.
 
 | Mode | Behavior | Tradeoff |
 | --- | --- | --- |
-| `hot-swap` | Warms length `1` decode at startup, unloads it, loads the prefill function while idle, then swaps to length `1` for decode and back after generation. | Default. Lower idle memory, with function load/unload cost around generation. |
+| `hot-swap` | Warms length `1` decode at startup, unloads it, loads the prefill function while idle, then swaps to length `1` for decode and back after generation. | Lower idle memory, with function load/unload cost around generation. |
 | `preload` | Preloads length `1` and the selected prefill size at startup, keeps decode resident, unloads prefill during decode, reloads prefill when idle. | Avoids cold decode load while still reducing decode-time memory. |
 | `always-loaded` | Preloads length `1` and the selected prefill size and never unloads either function. | Fastest transitions, highest memory use. |
-| `single-length` | Uses only the selected prefill length and restricts LM calls to that function. | Simplest resident set; decode also uses the selected length instead of length `1`. |
+| `single-length` | Uses only the selected prefill length and restricts LM calls to that function. | Default at length `16`. Good TTFB/RTF tradeoff; decode also uses the selected length instead of length `1`. |
 
 At startup the server also runs 5 synthetic predict calls through each CoreML
 package/function that remains loaded. Use `--startup-warmup-repeats 0` to skip
 this warmup, or set a different repeat count.
 
+If memory use is not a concern and you want the best steady-state performance,
+`preload` is usually the best option by RTF. Otherwise `single-length` tends to
+provide the best latency/performance tradeoff. In informal power observations,
+`single-length` 8 and 16 add very little power draw, under about 1 W; length 32
+is around 1 W higher; larger lengths cost progressively more energy.
+
+Benchmark results below use 2 warmup generations and 3 measured generations per
+scenario. Lower TTFB and RTF are better. `Hot-swap` is only reported for
+`hot-swap` mode; other modes do not perform a decode function swap.
+
+| Scenario | Mode | TTFB | RTF | Prefill | Hot-swap |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Text only | `preload` | 0.745s | 0.591 | 0.664s | - |
+| Text only | `hot-swap` | 1.095s | 0.672 | 0.322s | 0.721s |
+| Text only | `single-length-1` | 2.589s | 0.612 | 2.529s | - |
+| Text only | `single-length-8` | 0.474s | 0.664 | 0.413s | - |
+| Text only | `single-length-16` | 0.306s | 0.712 | 0.246s | - |
+| Text only | `single-length-32` | 0.224s | 0.723 | 0.170s | - |
+| Text only | `single-length-64` | 0.197s | 0.809 | 0.143s | - |
+| Text only | `single-length-128` | 0.163s | 1.029 | 0.110s | - |
+| Text + reference wav | `preload` | 0.745s | 0.593 | 0.652s | - |
+| Text + reference wav | `hot-swap` | 1.419s | 0.718 | 0.547s | 0.815s |
+| Text + reference wav | `single-length-1` | 3.681s | 0.646 | 3.605s | - |
+| Text + reference wav | `single-length-8` | 0.763s | 0.668 | 0.689s | - |
+| Text + reference wav | `single-length-16` | 0.538s | 0.686 | 0.473s | - |
+| Text + reference wav | `single-length-32` | 0.408s | 0.726 | 0.351s | - |
+| Text + reference wav | `single-length-64` | 0.382s | 0.812 | 0.329s | - |
+| Text + reference wav | `single-length-128` | 0.338s | 1.022 | 0.285s | - |
+| Text + prompt wav + transcript | `preload` | 0.394s | 0.590 | 0.306s | - |
+| Text + prompt wav + transcript | `hot-swap` | 1.225s | 0.662 | 0.361s | 0.811s |
+| Text + prompt wav + transcript | `single-length-1` | 4.100s | 0.632 | 4.023s | - |
+| Text + prompt wav + transcript | `single-length-8` | 0.841s | 0.664 | 0.781s | - |
+| Text + prompt wav + transcript | `single-length-16` | 0.583s | 0.699 | 0.527s | - |
+| Text + prompt wav + transcript | `single-length-32` | 0.468s | 0.728 | 0.412s | - |
+| Text + prompt wav + transcript | `single-length-64` | 0.382s | 0.813 | 0.328s | - |
+| Text + prompt wav + transcript | `single-length-128` | 0.341s | 1.045 | 0.287s | - |
+| Text + reference + prompt | `preload` | 0.520s | 0.596 | 0.445s | - |
+| Text + reference + prompt | `hot-swap` | 1.628s | 0.721 | 0.779s | 0.796s |
+| Text + reference + prompt | `single-length-1` | 5.000s | 0.637 | 4.934s | - |
+| Text + reference + prompt | `single-length-8` | 1.308s | 0.685 | 1.226s | - |
+| Text + reference + prompt | `single-length-16` | 0.749s | 0.688 | 0.686s | - |
+| Text + reference + prompt | `single-length-32` | 0.572s | 0.729 | 0.518s | - |
+| Text + reference + prompt | `single-length-64` | 0.486s | 0.812 | 0.434s | - |
+| Text + reference + prompt | `single-length-128` | 0.484s | 1.083 | 0.431s | - |
+| Preset voice reference | `preload` | 1.171s | 0.608 | 1.058s | - |
+| Preset voice reference | `hot-swap` | 1.423s | 0.673 | 0.560s | 0.802s |
+| Preset voice reference | `single-length-1` | 2.660s | 0.634 | 2.603s | - |
+| Preset voice reference | `single-length-8` | 0.503s | 0.682 | 0.445s | - |
+| Preset voice reference | `single-length-16` | 0.334s | 0.681 | 0.278s | - |
+| Preset voice reference | `single-length-32` | 0.262s | 0.722 | 0.208s | - |
+| Preset voice reference | `single-length-64` | 0.230s | 0.809 | 0.177s | - |
+| Preset voice reference | `single-length-128` | 0.198s | 1.066 | 0.146s | - |
+| Preset voice high similarity | `preload` | 1.182s | 0.592 | 1.045s | - |
+| Preset voice high similarity | `hot-swap` | 1.659s | 0.677 | 0.766s | 0.810s |
+| Preset voice high similarity | `single-length-1` | 10.845s | 0.622 | 10.728s | - |
+| Preset voice high similarity | `single-length-8` | 1.739s | 0.681 | 1.610s | - |
+| Preset voice high similarity | `single-length-16` | 0.969s | 0.678 | 0.863s | - |
+| Preset voice high similarity | `single-length-32` | 0.648s | 0.724 | 0.552s | - |
+| Preset voice high similarity | `single-length-64` | 0.494s | 0.806 | 0.390s | - |
+| Preset voice high similarity | `single-length-128` | 0.457s | 1.056 | 0.359s | - |
+
 Examples:
 
 ```bash
-# Default hot-swap behavior with prefill length 128.
-voxcpmane2-server --lm-mode hot-swap
+# Default single-length behavior with length 16.
+voxcpmane2-server
 
 # Keep both prefill and decode functions resident.
 voxcpmane2-server --lm-mode always-loaded
@@ -122,7 +185,7 @@ voxcpmane2-server --lm-mode always-loaded
 voxcpmane2-server --lm-mode preload
 
 # Use only one LM function length.
-voxcpmane2-server --lm-prefill-chunk-size 128 --lm-mode single-length
+voxcpmane2-server --lm-mode single-length --lm-prefill-chunk-size 16
 ```
 
 ## Model Path Options

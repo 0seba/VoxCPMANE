@@ -211,7 +211,6 @@ def lm_mode_kwargs(
     chunk_size: int,
     *,
     residual_lm_path: str | None,
-    lm_async_decode_load: bool,
 ) -> dict:
     if chunk_size == 1:
         kwargs = {
@@ -227,7 +226,6 @@ def lm_mode_kwargs(
             "lm_unload_inactive_functions": False,
             "lm_restrict_to_preload": True,
             "lm_preload_chunk_sizes": [chunk_size],
-            "lm_async_decode_load": False,
         },
         "preload": {
             "lm_unload_inactive_functions": True,
@@ -235,14 +233,12 @@ def lm_mode_kwargs(
             "lm_idle_prefill_chunk_size": chunk_size,
             "lm_preload_chunk_sizes": [1, chunk_size],
             "lm_keep_decode_function_loaded": True,
-            "lm_async_decode_load": False,
         },
         "always-loaded": {
             "lm_unload_inactive_functions": False,
             "lm_restrict_to_preload": False,
             "lm_preload_chunk_sizes": [1, chunk_size],
             "lm_keep_decode_function_loaded": True,
-            "lm_async_decode_load": False,
         },
         "hot-swap": {
             "lm_unload_inactive_functions": True,
@@ -250,7 +246,6 @@ def lm_mode_kwargs(
             "lm_idle_prefill_chunk_size": chunk_size,
             "lm_preload_chunk_sizes": [chunk_size],
             "lm_keep_decode_function_loaded": False,
-            "lm_async_decode_load": bool(lm_async_decode_load),
         },
     }
     try:
@@ -286,9 +281,8 @@ def load_model(
     repo_id: str = REPO_ID,
     included_voice_cache_dir: str | None = None,
     embedding_path: str | None = None,
-    lm_mode: str = "hot-swap",
-    lm_prefill_chunk_size: int | None = 128,
-    lm_async_decode_load: bool = False,
+    lm_mode: str = "single-length",
+    lm_prefill_chunk_size: int | None = 16,
     base_lm_splits: int = 2,
     compiled_fallback_dir: str | None = None,
     vae_early_decode_steps: int = 16,
@@ -398,7 +392,6 @@ def load_model(
                 lm_mode,
                 chunk_size,
                 residual_lm_path=residual_lm_path,
-                lm_async_decode_load=lm_async_decode_load,
             )
         )
         if lm_mode == "hot-swap" and chunk_size != 1:
@@ -926,7 +919,6 @@ def submit_generation_job(request: "SpeechRequest") -> GenerationJob:
 def record_audio_chunk(job: GenerationJob, chunk: np.ndarray) -> int:
     chunk_samples = int(chunk.shape[0])
     job.audio_samples_sent += chunk_samples
-    job.inference_loops_sent += 1
     _update_live_rtf(job, chunk_samples)
     _update_final_rtf(job, chunk_samples)
     return chunk_samples
@@ -1416,7 +1408,7 @@ def main():
         "--lm-mode",
         type=str,
         choices=["single-length", "preload", "always-loaded", "hot-swap"],
-        default="hot-swap",
+        default="single-length",
         help=(
             "Unified LM prefill and decode mode behavior: 'single-length' (use same length for "
             "prefill and decode, restrict to selected prefill size), 'preload' (preload length 1 "
@@ -1430,21 +1422,11 @@ def main():
         "--lm-prefill-chunk-size",
         type=int,
         choices=LM_MULTIFUNCTION_PREFILL_LENGTHS,
-        default=128,
+        default=16,
         help=(
-            "LM chunk length for prompt prefill (default: 128). Available "
+            "LM chunk length for prompt prefill (default: 16). Available "
             "values are 1, 8, 16, 32, 64, and 128; these lengths can also "
             "be used with --lm-mode single-length."
-        ),
-    )
-    parser.add_argument(
-        "--lm-async-decode-load",
-        action="store_true",
-        default=False,
-        help=(
-            "In LM hot-swap mode, start loading length_1 decode handles after "
-            "prefill and overlap that load with projections, LocDiT, and VAE "
-            "work before the first LM decode step."
         ),
     )
     parser.add_argument(

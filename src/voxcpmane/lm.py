@@ -283,6 +283,7 @@ class CoreMLMiniCPMLM:
                 if self.max_function_handles < n_functions:
                     self.max_function_handles = n_functions
                 self._load_multifunction_handles()
+        self._ensure_persistent_state()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Tuple[Any, None]:
         return self.forward(*args, **kwargs)
@@ -294,7 +295,7 @@ class CoreMLMiniCPMLM:
             self.current_position = 0
             return
         model = self._active_or_default_model()
-        self.state = model.make_state()
+        self._ensure_persistent_state(model)
         self.current_position = 0
 
     def snapshot_state_prefix(self, prefix_length: int) -> dict[str, np.ndarray]:
@@ -321,7 +322,7 @@ class CoreMLMiniCPMLM:
         return arrays
 
     def restore_state_prefix(self, snapshot: dict[str, np.ndarray], position: int) -> None:
-        """Restore a float16 KV prefix snapshot into a fresh CoreML MLState."""
+        """Restore a float16 KV prefix snapshot into the persistent MLState."""
         if self.is_chain:
             for idx, submodel in enumerate(self.submodels):
                 sub_snapshot = {
@@ -334,7 +335,7 @@ class CoreMLMiniCPMLM:
             return
 
         model = self._active_or_default_model()
-        self.state = model.make_state()
+        self._ensure_persistent_state(model)
         for name, cached in snapshot.items():
             shape = self.state_shape_by_name.get(name)
             if shape is None:
@@ -418,7 +419,7 @@ class CoreMLMiniCPMLM:
             length = x.shape[-1]
             chunks = []
             offset = 0
-            chunk_size = preferred_chunk_size if preferred_chunk_size is not None else self.chunk_size
+            chunk_size = self._select_runtime_chunk_size(preferred_chunk_size)
             while offset < length:
                 remaining = length - offset
                 consumed = min(remaining, chunk_size)
@@ -466,7 +467,7 @@ class CoreMLMiniCPMLM:
         state_needs_reset = bool(reset_state)
         if state_needs_reset:
             self.current_position = 0
-        chunk_size = preferred_chunk_size if preferred_chunk_size is not None else self.chunk_size
+        chunk_size = self._select_runtime_chunk_size(preferred_chunk_size)
         while offset < length:
             remaining = length - offset
             with self._profile(
@@ -490,12 +491,12 @@ class CoreMLMiniCPMLM:
                 profiler=profiler,
                 profile_prefix=profile_prefix,
             )
-            if state_needs_reset or self.state is None:
+            if self.state is None:
                 with self._profile(
                     profiler, f"{profile_prefix}/make_state_s{chunk_size}"
                 ):
-                    self.state = model.make_state()
-                state_needs_reset = False
+                    self._ensure_persistent_state(model)
+            state_needs_reset = False
             with self._profile(profiler, f"{profile_prefix}/predict_s{chunk_size}"):
                 result = model.predict(model_inputs, state=self.state)
                 hidden_states = result["hidden_states"]
@@ -578,6 +579,15 @@ class CoreMLMiniCPMLM:
         """Eagerly load all discovered ``length_<N>`` functions."""
         for chunk_size in sorted(self._function_names_by_chunk_size):
             self._model_for_chunk_size(chunk_size)
+
+    def _select_runtime_chunk_size(self, preferred_chunk_size: Optional[int]) -> int:
+        if preferred_chunk_size is not None:
+            preferred = int(preferred_chunk_size)
+            if preferred in self._function_names_by_chunk_size:
+                return preferred
+        if self.chunk_size in self._function_names_by_chunk_size:
+            return self.chunk_size
+        return min(self._function_names_by_chunk_size)
 
     def warmup_loaded_functions(
         self,
@@ -708,6 +718,7 @@ class CoreMLMiniCPMLM:
             self.lifecycle_events.append((event_name, time.perf_counter() - t0))
         if self.max_function_handles >= 1:
             if self.unload_inactive_functions:
+                self._models_by_chunk_size[chunk_size] = model
                 self._unload_inactive_function_handles(
                     active_chunk_size=chunk_size,
                     profile_prefix=profile_prefix,
@@ -724,7 +735,7 @@ class CoreMLMiniCPMLM:
                         evict,
                         event_name=f"{profile_prefix}/unload_function_s{evict}",
                     )
-            self._models_by_chunk_size[chunk_size] = model
+                self._models_by_chunk_size[chunk_size] = model
         return model
 
     def _unload_inactive_function_handles(
@@ -757,6 +768,27 @@ class CoreMLMiniCPMLM:
                 time.perf_counter() - t0,
             )
         )
+
+    def reset_position(self) -> None:
+        if self.is_chain:
+            for submodel in self.submodels:
+                submodel.reset_position()
+            self.current_position = 0
+            return
+        self.current_position = 0
+
+    def _ensure_persistent_state(
+        self,
+        model: Optional[ct.models.MLModel] = None,
+    ) -> None:
+        """Create the single request-reused MLState for this LM if needed."""
+        if self.is_chain:
+            for submodel in self.submodels:
+                submodel._ensure_persistent_state()
+            return
+        if self.state is not None:
+            return
+        self.state = (model or self._active_or_default_model()).make_state()
 
     def drain_lifecycle_events(self) -> list[tuple[str, float]]:
         if self.is_chain:

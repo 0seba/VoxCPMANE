@@ -40,6 +40,7 @@ class GenerationJob:
     final_printed: bool = False
     audio_samples_sent: int = 0
     inference_loops_sent: int = 0
+    last_inference_loop_at: Optional[float] = None
     live_rtf_started: bool = False
     last_live_rtf_at: Optional[float] = None
 
@@ -219,9 +220,15 @@ def _handle_metric_event(job: GenerationJob, event: GenerationMetricEvent) -> No
         job.prefill_done_at = float(values.get("at", time.perf_counter()))
     elif event.kind == "generation_start":
         job.generation_started_at = float(values.get("at", time.perf_counter()))
+        job.last_live_rtf_at = job.generation_started_at
         swap_seconds = values.get("swap_to_decode_seconds")
         if swap_seconds is not None:
             job.swap_to_decode_seconds = float(swap_seconds)
+    elif event.kind == "ar_loop":
+        index = values.get("index")
+        if index is not None:
+            job.inference_loops_sent = max(job.inference_loops_sent, int(index))
+        job.last_inference_loop_at = float(values.get("at", time.perf_counter()))
     elif event.kind == "final":
         job.status = str(values.get("status", "completed"))
         job.generation_seconds = float(values.get("generation_seconds", 0.0))
@@ -317,7 +324,11 @@ def _print_final_rtf_summary(job: GenerationJob) -> None:
     audio_seconds = job.audio_samples_sent / float(SAMPLE_RATE)
     if audio_seconds <= 0.0:
         return
-    generation_elapsed = max(0.0, now - job.generation_started_at)
+    generation_elapsed = (
+        job.generation_seconds
+        if job.generation_seconds is not None
+        else max(0.0, now - job.generation_started_at)
+    )
     avg_rtf = generation_elapsed / audio_seconds
     avg_loop_period = (
         generation_elapsed / job.inference_loops_sent
