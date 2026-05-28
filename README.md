@@ -3,7 +3,7 @@
 Install the VoxCPM2 package:
 
 ```bash
-uv pip install -U voxcpmane2
+uv tool install --python '>=3.10,<3.13' voxcpmane2
 ```
 
 VoxCPMANE2 is the VoxCPM2 version of [VoxCPMANE](../VoxCPMANE). It provides a
@@ -28,17 +28,23 @@ by default.
 ## Requirements
 
 - macOS on Apple Silicon
-- Python `>=3.10,<3.13`
+- Python `>=3.10,<3.13` is required
 - `uv` or `pip`
 - CoreML runtime support through `coremltools`
 - Optional: `pydub` for `mp3`, `opus`, `ogg`, and `aac` responses
 
 ## Installation
 
-Install with `uv`:
+Install as a `uv` tool:
 
 ```bash
-uv pip install -U voxcpmane2
+uv tool install --python '>=3.10,<3.13' voxcpmane2
+```
+
+Or install into an environment with `uv pip`:
+
+```bash
+uv pip install --python '>=3.10,<3.13' -U voxcpmane2
 ```
 
 Or install with `pip`:
@@ -47,8 +53,8 @@ Or install with `pip`:
 pip install -U voxcpmane2
 ```
 
-For editable development from a source checkout, run `uv pip install -e .` from
-this directory.
+For editable development from a source checkout, run
+`uv pip install --python '>=3.10,<3.13' -e .` from this directory.
 
 ## Run The Server
 
@@ -94,10 +100,14 @@ memory. The default prefill length is `128`. Available prefill lengths are `1`,
 
 | Mode | Behavior | Tradeoff |
 | --- | --- | --- |
-| `hot-swap` | Keeps the prefill function loaded while idle, loads length `1` for decode, unloads inactive functions, then swaps back after generation. | Default. Lower idle memory, with function load/unload cost around generation. |
+| `hot-swap` | Warms length `1` decode at startup, unloads it, loads the prefill function while idle, then swaps to length `1` for decode and back after generation. | Default. Lower idle memory, with function load/unload cost around generation. |
 | `preload` | Preloads length `1` and the selected prefill size at startup, keeps decode resident, unloads prefill during decode, reloads prefill when idle. | Avoids cold decode load while still reducing decode-time memory. |
 | `always-loaded` | Preloads length `1` and the selected prefill size and never unloads either function. | Fastest transitions, highest memory use. |
 | `single-length` | Uses only the selected prefill length and restricts LM calls to that function. | Simplest resident set; decode also uses the selected length instead of length `1`. |
+
+At startup the server also runs 5 synthetic predict calls through each CoreML
+package/function that remains loaded. Use `--startup-warmup-repeats 0` to skip
+this warmup, or set a different repeat count.
 
 Examples:
 

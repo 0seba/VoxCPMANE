@@ -75,6 +75,7 @@ class VoxCPM2Generator:
         lm_prefill_chunk_size: int | None = None,
         lm_async_decode_load: bool = False,
         lm_restrict_to_preload: bool = False,
+        lm_startup_decode_warmup_repeats: int = 0,
         vae_early_decode_steps: int = 16,
         vae_batch_decode_steps: int = 4,
     ):
@@ -148,6 +149,7 @@ class VoxCPM2Generator:
             "preload_chunk_sizes": lm_preload_chunk_sizes,
             "keep_default_function_loaded": lm_keep_decode_function_loaded,
             "restrict_to_preload": lm_restrict_to_preload,
+            "startup_decode_warmup_repeats": lm_startup_decode_warmup_repeats,
         }
         if base_lm_model_path is not None:
             self.base_lm = CoreMLMiniCPMLM(
@@ -248,6 +250,103 @@ class VoxCPM2Generator:
             flush=True,
         )
 
+    def warmup_startup_models(self, repeats: int = 5) -> None:
+        """Run synthetic predicts through each loaded CoreML model/function."""
+        repeats = max(0, int(repeats))
+        if repeats == 0:
+            return
+
+        t0 = time.perf_counter()
+        print(
+            f"🔥 CoreML startup warmup: {repeats} predict calls per loaded model/function...",
+            flush=True,
+        )
+
+        def run(name: str, fn: Callable[[], None]) -> None:
+            stage_t0 = time.perf_counter()
+            fn()
+            print(
+                f"   ✓ {name}: {time.perf_counter() - stage_t0:.3f}s",
+                flush=True,
+            )
+
+        def warm_vae_encoder() -> None:
+            audio = np.zeros((self.vae_encoder.chunk_samples,), dtype=np.float32)
+            self.vae_encoder.reset()
+            for _ in range(repeats):
+                self.vae_encoder.encode_chunk(audio)
+            self.vae_encoder.reset()
+
+        def warm_feat_encoder() -> None:
+            patches = np.zeros(
+                (1, 1, self.patch_size, self.latent_dim),
+                dtype=np.float32,
+            )
+            for _ in range(repeats):
+                self.feat_encoder.encode_patches(patches)
+
+        def warm_base_lm() -> None:
+            self.base_lm.warmup_loaded_functions(repeats=repeats)
+
+        def warm_residual_lm() -> None:
+            self.residual_lm.warmup_loaded_functions(repeats=repeats)
+
+        def warm_locdit() -> None:
+            mu = np.zeros((1, 2 * self.dit_hidden_dim), dtype=np.float32)
+            cond = np.zeros(
+                (1, self.latent_dim, self.patch_size),
+                dtype=np.float32,
+            )
+            rng = np.random.default_rng(0)
+            for _ in range(repeats):
+                self.locdit.predict_numpy(
+                    mu=mu,
+                    n_timesteps=1,
+                    patch_size=self.patch_size,
+                    cond=cond,
+                    cfg_value=1.0,
+                    use_cfg_zero_star=False,
+                    rng=rng,
+                )
+
+        def warm_vae_decoder() -> None:
+            z = np.zeros(
+                (1, self.latent_dim, self.patch_size),
+                dtype=np.float32,
+            )
+            self.vae_decoder.reset()
+            for _ in range(repeats):
+                self.vae_decoder.decode_chunk(z)
+            self.vae_decoder.reset()
+
+        def warm_fsq() -> None:
+            channels = getattr(self, "fsq_input_channels", self.hidden_size)
+            x = np.zeros(
+                (1, channels, 1, self._select_fsq_enumerated_chunk(1)),
+                dtype=np.float32,
+            )
+            for _ in range(repeats):
+                self._fsq(x, preferred_chunk_size=x.shape[-1])
+
+        def warm_projections() -> None:
+            lm_hidden = np.zeros((1, self.hidden_size, 1, 1), dtype=np.float32)
+            residual_hidden = np.zeros((1, self.hidden_size, 1, 1), dtype=np.float32)
+            for _ in range(repeats):
+                self._projections(lm_hidden, residual_hidden)
+
+        run("audio_vae_encoder", warm_vae_encoder)
+        run("feat_encoder", warm_feat_encoder)
+        run("base_lm loaded functions", warm_base_lm)
+        run("residual_lm loaded functions", warm_residual_lm)
+        run("locdit", warm_locdit)
+        run("audio_vae_decoder", warm_vae_decoder)
+        run("fsq", warm_fsq)
+        run("projections", warm_projections)
+        print(
+            f"✅ CoreML startup warmup complete in {time.perf_counter() - t0:.3f}s.",
+            flush=True,
+        )
+
     @staticmethod
     def _resolve_prefill_chunk_size(lm: object, preferred: int | None) -> int | None:
         if preferred is None:
@@ -337,6 +436,7 @@ class VoxCPM2Generator:
     def _configure_fsq_runtime(self, model_path: Path) -> None:
         self.fsq_input_dtype = np.float16
         self.fsq_fixed_chunk_size = self.input_seq_length
+        self.fsq_input_channels = self.hidden_size
         self.fsq_range_max_seq_length: int | None = None
         self.fsq_enumerated_seq_lengths: tuple[int, ...] = ()
 
@@ -348,6 +448,7 @@ class VoxCPM2Generator:
         self.fsq_input_dtype = info["dtype"]
         shape = info["shape"]
         if len(shape) == 4:
+            self.fsq_input_channels = int(shape[1])
             self.fsq_fixed_chunk_size = int(shape[-1])
 
         shape_range = info["shape_range"]

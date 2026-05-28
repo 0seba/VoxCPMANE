@@ -16,6 +16,7 @@ is imported lazily and outputs are returned on the original device/dtype.
 from __future__ import annotations
 
 import time
+import gc
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
@@ -64,6 +65,7 @@ class CoreMLMiniCPMLM:
         preload_chunk_sizes: Optional[List[int]] = None,
         keep_default_function_loaded: bool = False,
         restrict_to_preload: bool = False,
+        startup_decode_warmup_repeats: int = 0,
     ):
         self.compute_units = compute_units
         self.embed_tokens = embed_tokens
@@ -90,6 +92,7 @@ class CoreMLMiniCPMLM:
                     preload_chunk_sizes=preload_chunk_sizes,
                     keep_default_function_loaded=keep_default_function_loaded,
                     restrict_to_preload=restrict_to_preload,
+                    startup_decode_warmup_repeats=startup_decode_warmup_repeats,
                 )
                 for p in model_paths
             ]
@@ -215,6 +218,22 @@ class CoreMLMiniCPMLM:
             self._discover_multifunction_functions_from_metadata(metadata)
         else:
             self._discover_multifunction_functions(spec)
+        if startup_decode_warmup_repeats > 0:
+            decode_chunk_size = self.chunk_size
+            if decode_chunk_size not in self._function_names_by_chunk_size:
+                decode_chunk_size = min(self._function_names_by_chunk_size)
+            self.warmup_function(
+                decode_chunk_size,
+                repeats=startup_decode_warmup_repeats,
+                profile_prefix="startup_decode_warmup",
+            )
+            self._unload_function(
+                decode_chunk_size,
+                event_name=f"startup_decode_warmup/unload_function_s{decode_chunk_size}",
+            )
+            if decode_chunk_size == self.chunk_size:
+                self.model = None
+            gc.collect()
         if preload_chunk_sizes:
             self.model = None
             self.max_function_handles = max(
@@ -559,6 +578,82 @@ class CoreMLMiniCPMLM:
         """Eagerly load all discovered ``length_<N>`` functions."""
         for chunk_size in sorted(self._function_names_by_chunk_size):
             self._model_for_chunk_size(chunk_size)
+
+    def warmup_loaded_functions(
+        self,
+        *,
+        repeats: int = 5,
+        profile_prefix: str = "startup_warmup",
+    ) -> None:
+        """Run synthetic single predicts through every currently loaded handle."""
+        if self.is_chain:
+            for idx, submodel in enumerate(self.submodels):
+                submodel.warmup_loaded_functions(
+                    repeats=repeats,
+                    profile_prefix=f"{profile_prefix}/part{idx}",
+                )
+            self.current_position = 0
+            return
+        loaded = [
+            (chunk_size, self._models_by_chunk_size[chunk_size])
+            for chunk_size in sorted(self._models_by_chunk_size)
+        ]
+        for chunk_size, model in loaded:
+            self._warmup_model(
+                model,
+                chunk_size,
+                repeats=repeats,
+            )
+
+    def warmup_function(
+        self,
+        chunk_size: int,
+        *,
+        repeats: int = 5,
+        profile_prefix: str = "startup_warmup",
+    ) -> None:
+        """Load one function handle and execute independent dummy predicts."""
+        if self.is_chain:
+            for idx, submodel in enumerate(self.submodels):
+                submodel.warmup_function(
+                    chunk_size,
+                    repeats=repeats,
+                    profile_prefix=f"{profile_prefix}/part{idx}",
+                )
+            self.current_position = 0
+            return
+
+        repeats = max(0, int(repeats))
+        if repeats == 0:
+            return
+        model = self._model_for_chunk_size(chunk_size, profile_prefix=profile_prefix)
+        self._warmup_model(model, chunk_size, repeats=repeats)
+
+    def _warmup_model(
+        self,
+        model: ct.models.MLModel,
+        chunk_size: int,
+        *,
+        repeats: int,
+    ) -> None:
+        x = np.zeros(
+            (self.batch_size, self.input_channels, self.spatial_dim, int(chunk_size)),
+            dtype=np.float32,
+        )
+        for _ in range(repeats):
+            self.current_position = 0
+            state = model.make_state()
+            model_inputs = {
+                "inputs_embeds": x,
+                "position_id": self._position_id_value(),
+            }
+            if self.position_index_seed_shape is not None:
+                model_inputs["position_index_seed"] = np.zeros(
+                    (int(chunk_size),), dtype=np.int32
+                )
+            model.predict(model_inputs, state=state)
+        self.state = None
+        self.current_position = 0
 
     def _active_or_default_model(self) -> Any:
         model = self._models_by_chunk_size.get(self.chunk_size)

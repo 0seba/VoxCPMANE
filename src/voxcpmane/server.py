@@ -302,6 +302,7 @@ def load_model(
     fsq_path: str | None = None,
     projections_path: str | None = None,
     compile_and_save: bool = False,
+    startup_warmup_repeats: int = 5,
 ):
     """Load VoxCPM2Generator. Called once from main()."""
     global generator, MODEL_PATH_PREFIX, VOICE_CACHE_DIR, VOICE_CACHE_DIRS
@@ -400,12 +401,17 @@ def load_model(
                 lm_async_decode_load=lm_async_decode_load,
             )
         )
+        if lm_mode == "hot-swap" and chunk_size != 1:
+            gen_kwargs["lm_startup_decode_warmup_repeats"] = int(
+                startup_warmup_repeats
+            )
 
     pathify_gen_kwargs(gen_kwargs)
 
     print("Loading CoreML models via VoxCPM2Generator...")
     generator = VoxCPM2Generator(pathlib.Path(generator_model_dir), **gen_kwargs)
     generator.preload_tokenizer()
+    generator.warmup_startup_models(repeats=startup_warmup_repeats)
     print("✅ Models loaded successfully.")
 
 
@@ -1519,6 +1525,17 @@ def main():
         action="store_true",
         default=False,
         help="Compile CoreML .mlpackage files into .mlmodelc on the fly if they do not exist.",
+    )
+    parser.add_argument(
+        "--startup-warmup-repeats",
+        type=int,
+        default=5,
+        help=(
+            "Number of synthetic predict calls to run per CoreML model/function "
+            "during startup warmup. In hot-swap mode, the length_1 LM decode "
+            "functions are warmed, unloaded, then the idle prefill functions "
+            "are loaded. Use 0 to disable startup warmup."
+        ),
     )
 
     args = parser.parse_args()
