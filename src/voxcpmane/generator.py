@@ -149,13 +149,14 @@ class VoxCPM2Generator:
         }
         if base_lm_model_path is not None:
             self.base_lm = CoreMLMiniCPMLM(
-                _compiled_sibling(base_lm_model_path), **lm_kwargs
+                _compiled_sibling(base_lm_model_path), **lm_kwargs, label="base_lm"
             )
         elif base_lm_split_model_paths is not None:
             base_paths = [_compiled_sibling(p) for p in base_lm_split_model_paths]
             self.base_lm = CoreMLMiniCPMLM(
                 base_paths,
                 **lm_kwargs,
+                label="base_lm",
             )
         elif base_lm_splits > 1:
             base_paths = [
@@ -168,11 +169,13 @@ class VoxCPM2Generator:
             self.base_lm = CoreMLMiniCPMLM(
                 base_paths,
                 **lm_kwargs,
+                label="base_lm",
             )
         else:
             self.base_lm = CoreMLMiniCPMLM(
                 _compiled_sibling(mdir / f"base_lm_s{input_seq_length}.mlpackage"),
                 **lm_kwargs,
+                label="base_lm",
             )
 
         self.residual_lm = CoreMLMiniCPMLM(
@@ -181,6 +184,7 @@ class VoxCPM2Generator:
                 or mdir / f"residual_lm_fused_s{input_seq_length}.mlpackage"
             ),
             **lm_kwargs,
+            label="residual_lm",
         )
         self._base_lm_prefill_chunk_size = self._resolve_prefill_chunk_size(
             self.base_lm, self.lm_prefill_chunk_size

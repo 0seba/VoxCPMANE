@@ -1,7 +1,6 @@
 """Numpy / CoreML inference wrapper for the fused VoxCPM2 feat_encoder.
 
 Runtime counterpart to ``src/qeml/conversion/voxcpm2/feat_encoder.py``.
-No PyTorch — only numpy and coremltools.
 
 The converted ``.mlpackage`` is now channels-first NCHW:
 ``(chunk_patches, feat_dim, 1, patch_size) → (chunk_patches, lm_hidden, 1, 1)``.

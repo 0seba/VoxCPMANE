@@ -5,9 +5,7 @@ NCHW layout (see :mod:`qeml.conversion.voxcpm2.locdit`) and returns the
 velocity prediction for both the conditional and unconditional branches
 in one predict call.
 
-This module is numpy-only — no torch dependency. For the torch-compatible
-subclass used when monkey-patching a live VoxCPM2 ``nn.Module`` graph,
-see :mod:`qeml.voxcpm2.locdit_torch`.
+This module is numpy-only.
 """
 
 from __future__ import annotations
@@ -48,9 +46,7 @@ class CoreMLUnifiedCFM:
     both halves of that batch (cond + uncond) per step, then splits the
     output to recover ``dphi_dt`` and ``cfg_dphi_dt``.
 
-    Pure numpy — no torch. For a torch ``nn.Module`` wrapper that can be
-    installed as a ``tts.feat_decoder`` submodule, see
-    :class:`qeml.voxcpm2.locdit_torch.CoreMLUnifiedCFM`.
+    Pure numpy and CoreML.
     """
 
     def __init__(
@@ -139,7 +135,7 @@ class CoreMLUnifiedCFM:
         rng: np.random.Generator | None = None,
         timings: dict | None = None,
     ) -> np.ndarray:
-        """Numpy-only diffusion sampling — no torch dependency.
+        """Numpy-only diffusion sampling.
 
         Args:
             mu: ``(B, 2 * dit_hidden)`` flat concatenated projections.

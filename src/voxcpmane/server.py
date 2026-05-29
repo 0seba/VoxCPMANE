@@ -72,6 +72,10 @@ PYDUB_AUDIO_FORMATS = {
 }
 
 
+def default_lm_prefill_chunk_size(lm_mode: str) -> int:
+    return 128 if lm_mode in {"preload", "hot-swap"} else 16
+
+
 COMPONENT_PATH_SPECS = (
     (
         "residual_lm_model_path",
@@ -282,7 +286,7 @@ def load_model(
     included_voice_cache_dir: str | None = None,
     embedding_path: str | None = None,
     lm_mode: str = "single-length",
-    lm_prefill_chunk_size: int | None = 16,
+    lm_prefill_chunk_size: int | None = None,
     base_lm_splits: int = 2,
     compiled_fallback_dir: str | None = None,
     vae_early_decode_steps: int = 16,
@@ -378,6 +382,8 @@ def load_model(
         gen_kwargs["compiled_fallback_dir"] = os.path.abspath(compiled_fallback_dir)
 
     # 4. Configure LM prefill and decode mode behavior
+    if lm_prefill_chunk_size is None:
+        lm_prefill_chunk_size = default_lm_prefill_chunk_size(lm_mode)
     if lm_prefill_chunk_size is not None:
         chunk_size = int(lm_prefill_chunk_size)
         if chunk_size not in LM_MULTIFUNCTION_PREFILL_LENGTHS:
@@ -1422,11 +1428,11 @@ def main():
         "--lm-prefill-chunk-size",
         type=int,
         choices=LM_MULTIFUNCTION_PREFILL_LENGTHS,
-        default=16,
+        default=None,
         help=(
-            "LM chunk length for prompt prefill (default: 16). Available "
-            "values are 1, 8, 16, 32, 64, and 128; these lengths can also "
-            "be used with --lm-mode single-length."
+            "LM chunk length for prompt prefill. Defaults to 128 for preload "
+            "and hot-swap, otherwise 16. Available values are 1, 8, 16, 32, "
+            "64, and 128."
         ),
     )
     parser.add_argument(
@@ -1514,9 +1520,10 @@ def main():
         default=5,
         help=(
             "Number of synthetic predict calls to run per CoreML model/function "
-            "during startup warmup. In hot-swap mode, the length_1 LM decode "
-            "functions are warmed, unloaded, then the idle prefill functions "
-            "are loaded. Use 0 to disable startup warmup."
+            "during startup warmup. In hot-swap mode, the idle prefill "
+            "functions are warmed and unloaded, the length_1 decode functions "
+            "are warmed and unloaded, then the idle prefill functions are "
+            "loaded. Use 0 to disable startup warmup."
         ),
     )
 

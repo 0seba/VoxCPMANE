@@ -1,7 +1,6 @@
 """Numpy / CoreML inference wrapper for the VoxCPM2 AudioVAE encoder.
 
 Runtime counterpart to ``src/qeml/conversion/voxcpm2/audio_vae_encoder.py``.
-No PyTorch — only numpy, coremltools, soundfile, and soxr.
 
 The converted ``.mlpackage`` has a **fixed per-call input length** and
 threads a per-stage **streaming cache** through every call. Callers are

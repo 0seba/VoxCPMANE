@@ -3,14 +3,11 @@
 The converted model has a fixed CoreML input shape
 ``(1, channels, 1, chunk_size)`` and persistent MLState KV caches.  This
 wrapper presents the subset of ``MiniCPMModel`` used by
-``VoxCPM2Model._inference``:
+``VoxCPM2Generator``:
 
 * ``forward(inputs_embeds, is_causal=True) -> (hidden_states, None)``
 * ``forward_step(inputs_embeds, position_id) -> hidden_states``
 * ``kv_cache.fill_caches(...)`` and ``kv_cache.step()``
-
-It accepts numpy arrays directly.  If PyTorch tensors are passed, torch
-is imported lazily and outputs are returned on the original device/dtype.
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ import time
 import gc
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import coremltools as ct
 import numpy as np
@@ -66,11 +63,13 @@ class CoreMLMiniCPMLM:
         keep_default_function_loaded: bool = False,
         restrict_to_preload: bool = False,
         startup_decode_warmup_repeats: int = 0,
+        label: str = "lm",
     ):
         self.compute_units = compute_units
         self.embed_tokens = embed_tokens
         self.kv_cache = _RuntimeKVCache(self)
         self.current_position = 0
+        self.label = label
 
         # Support sequence of paths/models (chained model)
         if isinstance(model_path, (list, tuple, Sequence)) and not isinstance(
@@ -93,8 +92,9 @@ class CoreMLMiniCPMLM:
                     keep_default_function_loaded=keep_default_function_loaded,
                     restrict_to_preload=restrict_to_preload,
                     startup_decode_warmup_repeats=startup_decode_warmup_repeats,
+                    label=f"{label}/part{i}",
                 )
-                for p in model_paths
+                for i, p in enumerate(model_paths)
             ]
             
             shapes = [
@@ -218,22 +218,10 @@ class CoreMLMiniCPMLM:
             self._discover_multifunction_functions_from_metadata(metadata)
         else:
             self._discover_multifunction_functions(spec)
-        if startup_decode_warmup_repeats > 0:
-            decode_chunk_size = self.chunk_size
-            if decode_chunk_size not in self._function_names_by_chunk_size:
-                decode_chunk_size = min(self._function_names_by_chunk_size)
-            self.warmup_function(
-                decode_chunk_size,
-                repeats=startup_decode_warmup_repeats,
-                profile_prefix="startup_decode_warmup",
-            )
-            self._unload_function(
-                decode_chunk_size,
-                event_name=f"startup_decode_warmup/unload_function_s{decode_chunk_size}",
-            )
-            if decode_chunk_size == self.chunk_size:
-                self.model = None
-            gc.collect()
+        decode_warmup_repeats = max(0, int(startup_decode_warmup_repeats))
+        decode_chunk_size = self.chunk_size
+        if decode_chunk_size not in self._function_names_by_chunk_size:
+            decode_chunk_size = min(self._function_names_by_chunk_size)
         if preload_chunk_sizes:
             self.model = None
             self.max_function_handles = max(
@@ -245,6 +233,39 @@ class CoreMLMiniCPMLM:
                     for cs, name in self._function_names_by_chunk_size.items()
                     if cs in preload_chunk_sizes
                 }
+            if decode_warmup_repeats > 0:
+                prefill_warmup_sizes = [
+                    cs for cs in preload_chunk_sizes if cs != decode_chunk_size
+                ]
+                for cs in prefill_warmup_sizes:
+                    if cs not in self._function_names_by_chunk_size:
+                        raise ValueError(
+                            f"preload chunk size {cs} not available in model; "
+                            f"available: {sorted(self._function_names_by_chunk_size)}"
+                        )
+                    self.warmup_function(
+                        cs,
+                        repeats=decode_warmup_repeats,
+                        profile_prefix="startup_prefill_warmup",
+                    )
+                    self._unload_function(
+                        cs,
+                        event_name=f"startup_prefill_warmup/unload_function_s{cs}",
+                    )
+                if prefill_warmup_sizes:
+                    gc.collect()
+                self.warmup_function(
+                    decode_chunk_size,
+                    repeats=decode_warmup_repeats,
+                    profile_prefix="startup_decode_warmup",
+                )
+                self._unload_function(
+                    decode_chunk_size,
+                    event_name=f"startup_decode_warmup/unload_function_s{decode_chunk_size}",
+                )
+                if decode_chunk_size == self.chunk_size:
+                    self.model = None
+                gc.collect()
             for cs in preload_chunk_sizes:
                 if cs in self._function_names_by_chunk_size:
                     self._model_for_chunk_size(cs, profile_prefix="preload")
@@ -254,6 +275,19 @@ class CoreMLMiniCPMLM:
                         f"available: {sorted(self._function_names_by_chunk_size)}"
                     )
         else:
+            if decode_warmup_repeats > 0:
+                self.warmup_function(
+                    decode_chunk_size,
+                    repeats=decode_warmup_repeats,
+                    profile_prefix="startup_decode_warmup",
+                )
+                self._unload_function(
+                    decode_chunk_size,
+                    event_name=f"startup_decode_warmup/unload_function_s{decode_chunk_size}",
+                )
+                if decode_chunk_size == self.chunk_size:
+                    self.model = None
+                gc.collect()
             self.model = self._load_default_model_func(default_function_name)
             self._models_by_chunk_size[self.chunk_size] = self.model
             if (
@@ -353,7 +387,7 @@ class CoreMLMiniCPMLM:
 
     def forward(
         self,
-        inputs_embeds: Any,
+        inputs_embeds: np.ndarray,
         is_causal: bool = True,
         reset_state: bool = True,
         profiler: Optional[Any] = None,
@@ -375,7 +409,7 @@ class CoreMLMiniCPMLM:
 
     def forward_step(
         self,
-        inputs_embeds: Any,
+        inputs_embeds: np.ndarray,
         position_id: Any = None,
         profiler: Optional[Any] = None,
         profile_prefix: str = "lm",
@@ -397,7 +431,7 @@ class CoreMLMiniCPMLM:
 
     def _run(
         self,
-        inputs_embeds: Any,
+        inputs_embeds: np.ndarray,
         *,
         reset_state: bool,
         profiler: Optional[Any] = None,
@@ -406,7 +440,7 @@ class CoreMLMiniCPMLM:
     ) -> Any:
         if self.is_chain:
             with self._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
-                arr, restore, original_rank = self._to_numpy(inputs_embeds)
+                arr, original_rank = self._to_numpy(inputs_embeds)
                 x = self._to_nchw(arr)
 
             if x.shape[0] != 1:
@@ -446,12 +480,11 @@ class CoreMLMiniCPMLM:
 
             with self._profile(profiler, f"{profile_prefix}/concat_restore"):
                 out = np.concatenate(chunks, axis=-1)[..., :length]
-                out = self._from_nchw(out, original_rank)
-                return restore(out)
+                return self._from_nchw(out, original_rank)
 
         # Single model execution
         with self._profile(profiler, f"{profile_prefix}/to_numpy_nchw"):
-            arr, restore, original_rank = self._to_numpy(inputs_embeds)
+            arr, original_rank = self._to_numpy(inputs_embeds)
             x = self._to_nchw(arr)
 
         if x.shape[0] != 1:
@@ -506,8 +539,7 @@ class CoreMLMiniCPMLM:
 
         with self._profile(profiler, f"{profile_prefix}/concat_restore"):
             out = np.concatenate(chunks, axis=-1)
-            out = self._from_nchw(out, original_rank)
-            return restore(out)
+            return self._from_nchw(out, original_rank)
 
     def _record_multifunction_function(
         self,
@@ -636,8 +668,15 @@ class CoreMLMiniCPMLM:
         repeats = max(0, int(repeats))
         if repeats == 0:
             return
+        t0 = time.perf_counter()
         model = self._model_for_chunk_size(chunk_size, profile_prefix=profile_prefix)
         self._warmup_model(model, chunk_size, repeats=repeats)
+        if profile_prefix.startswith("startup"):
+            print(
+                f"   ✓ {self.label} {profile_prefix} length_{chunk_size}: "
+                f"{time.perf_counter() - t0:.3f}s",
+                flush=True,
+            )
 
     def _warmup_model(
         self,
@@ -895,31 +934,11 @@ class CoreMLMiniCPMLM:
         return min(lengths) if lengths else None
 
     @staticmethod
-    def _to_numpy(x: Any) -> Tuple[np.ndarray, Callable[[np.ndarray], Any], int]:
-        """Return ``(float32_numpy, restore_fn, original_rank)``."""
-        if isinstance(x, np.ndarray):
-            original_rank = x.ndim
-            return x.astype(np.float32, copy=False), lambda y: y, original_rank
-
-        try:
-            import torch
-        except ImportError as exc:
-            raise TypeError(
-                "inputs_embeds must be a numpy array unless torch is installed"
-            ) from exc
-
-        if not isinstance(x, torch.Tensor):
-            raise TypeError(f"expected numpy array or torch.Tensor, got {type(x)!r}")
-
-        device = x.device
-        dtype = x.dtype
-        original_rank = x.dim()
-        arr = x.detach().cpu().to(torch.float32).numpy()
-
-        def restore(y: np.ndarray) -> torch.Tensor:
-            return torch.from_numpy(y).to(device=device, dtype=dtype)
-
-        return arr, restore, original_rank
+    def _to_numpy(x: np.ndarray) -> Tuple[np.ndarray, int]:
+        """Return ``(float32_numpy, original_rank)``."""
+        if not isinstance(x, np.ndarray):
+            raise TypeError(f"inputs_embeds must be a numpy array, got {type(x)!r}")
+        return x.astype(np.float32, copy=False), x.ndim
 
     @staticmethod
     def _to_nchw(x: np.ndarray) -> np.ndarray:

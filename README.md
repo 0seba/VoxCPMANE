@@ -105,18 +105,16 @@ under `caches/`.
 `--lm-mode` controls how multifunction LM prefill and decode handles are kept in
 memory. The default mode is fixed-length `16`, exposed as `single-length` with
 prefill/decode length `16`. Available prefill lengths are `1`, `8`, `16`, `32`,
-`64`, and `128`; any of these can be used with `single-length` mode.
+`64`, and `128`; any of these can be used with `single-length` mode. If
+`--lm-prefill-chunk-size` is omitted, `preload` and `hot-swap` default to
+prefill length `128`; other modes default to `16`.
 
 | Mode | Behavior | Tradeoff |
 | --- | --- | --- |
-| `hot-swap` | Warms length `1` decode at startup, unloads it, loads the prefill function while idle, then swaps to length `1` for decode and back after generation. | Lower idle memory, with function load/unload cost around generation. |
-| `preload` | Preloads length `1` and the selected prefill size at startup, keeps decode resident, unloads prefill during decode, reloads prefill when idle. | Avoids cold decode load while still reducing decode-time memory. |
-| `always-loaded` | Preloads length `1` and the selected prefill size and never unloads either function. | Fastest transitions, highest memory use. |
+| `hot-swap` | Keeps the selected prefill function loaded while idle, then swaps to length `1` for decode and back after generation. | Lower idle memory, with function load/unload cost around generation. |
+| `preload` | Keeps length `1` and the selected prefill size resident for both BaseLM and ResidualLM, unloads prefill during decode, then reloads prefill when idle. | Avoids cold decode load, but roughly doubles BaseLM and ResidualLM resident memory. |
+| `always-loaded` | Keeps length `1` and the selected prefill size resident and never unloads either function. | Fastest transitions, highest memory use. |
 | `single-length` | Uses only the selected prefill length and restricts LM calls to that function. | Default at length `16`. Good TTFB/RTF tradeoff; decode also uses the selected length instead of length `1`. |
-
-At startup the server also runs 5 synthetic predict calls through each CoreML
-package/function that remains loaded. Use `--startup-warmup-repeats 0` to skip
-this warmup, or set a different repeat count.
 
 If memory use is not a concern and you want the best steady-state performance,
 `preload` is usually the best option by RTF. Otherwise `single-length` tends to
@@ -124,9 +122,39 @@ provide the best latency/performance tradeoff. In informal power observations,
 `single-length` 8 and 16 add very little power draw, under about 1 W; length 32
 is around 1 W higher; larger lengths cost progressively more energy.
 
-Benchmark results below use 2 warmup generations and 3 measured generations per
-scenario. Lower TTFB and RTF are better. `Hot-swap` is only reported for
-`hot-swap` mode; other modes do not perform a decode function swap.
+Lower TTFB and RTF are better. `Hot-swap` is only reported for `hot-swap` mode;
+other modes do not perform a decode function swap.
+
+## Memory Notes
+
+The default compiled CoreML model bundle is about 3.2 GB by apparent file size.
+This is a useful floor for estimating memory pressure because CoreML must load
+the model programs and weights, and runtime state/KV caches add more memory on
+top. Actual resident memory varies by macOS/CoreML version, compute unit
+placement, active function handles, and request shape.
+
+Approximate compiled model sizes in the default bundle:
+
+| Component | Size |
+| --- | ---: |
+| BaseLM multifunction | 1.71 GB |
+| ResidualLM multifunction | 615 MB |
+| Feat encoder | 420 MB |
+| LocDiT | 260 MB |
+| Audio VAE encoder | 96 MB |
+| Audio VAE decoder | 92 MB |
+| Projections | 17 MB |
+| FSQ | 8 MB |
+| Total compiled models | 3.2 GB |
+
+`preload` mode is intentionally memory-heavy. BaseLM and ResidualLM are separate
+CoreML multifunction packages, and each loaded function is a separate CoreML
+model handle. Keeping both length `1` and the selected prefill length resident
+therefore roughly doubles the BaseLM and ResidualLM memory footprint compared
+with modes that keep only one LM function resident. Based on the default bundle
+sizes, the extra resident model memory for that second LM function is about
+2.3 GB: roughly 1.71 GB for BaseLM plus 615 MB for ResidualLM, before CoreML
+runtime overhead and KV/state buffers.
 
 | Scenario | Mode | TTFB | RTF | Prefill | Hot-swap |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -188,7 +216,7 @@ voxcpmane2-server
 # Keep both prefill and decode functions resident.
 voxcpmane2-server --lm-mode always-loaded
 
-# Preload decode and prefill, but unload prefill during decode.
+# Preload decode and prefill length 128, but unload prefill during decode.
 voxcpmane2-server --lm-mode preload
 
 # Use only one LM function length.
@@ -234,7 +262,7 @@ When `voice` is set, `voice_mode` controls preset voice conditioning:
 `reference` uses the cached reference audio only and has lower first-byte
 latency; `reference_plus_prompt` uses the cached reference voice plus a supplied
 `prompt_wav_path` and matching `prompt_text`; `high_similarity` uses cached
-prompt embeddings, transcript, and VAE decoder warmup context when available.
+prompt embeddings, transcript, and VAE decoder context when available.
 
 Supported `response_format` values are `wav`, `flac`, `mp3`, `opus`, `ogg`,
 and `aac`. Non-`wav`/`flac` formats require `pydub`.
@@ -277,8 +305,8 @@ Voice caches use feature-encoder outputs, not full VAE encoder latents:
 - `name.prompt.embed.npy`: optional continuation prompt embeddings
 - `name.prompt.cond.npy`: optional final prompt VAE patch used to seed
   high-similarity continuation decoding
-- `name.prompt.decode_context.npy`: optional tail prompt VAE patches used to
-  warm the streaming VAE decoder for high-similarity audio continuity
+- `name.prompt.decode_context.npy`: optional tail prompt VAE patches used for
+  high-similarity audio continuity
 
 Included voices may also ship LM prefix KV caches as `caches/name.lm_prefix.npz`.
 Matching caches restore the base/residual LM prefix on the first request. Missing

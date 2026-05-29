@@ -2,7 +2,7 @@
 
 Drop-in replacements for the small subset of librosa that VoxCPM's
 ``_encode_wav`` needs, built on ``soundfile`` (libsndfile) for decoding and
-``soxr`` for high-quality resampling. No PyTorch, no librosa.
+``soxr`` for high-quality resampling.
 """
 
 from __future__ import annotations
