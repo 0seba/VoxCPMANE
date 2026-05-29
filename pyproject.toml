@@ -14,11 +14,10 @@ readme = "README.md"
 dependencies = [
     "coremltools==9.0",
     "numpy>=2",
-    "safetensors>=0.4.0",
     "ml-dtypes>=0.5.0",
     "soundfile",
     "soxr>=1.0.0",
-    "transformers",
+    "tokenizers",
     "fastapi",
     "uvicorn",
     "aiofiles",
@@ -29,6 +28,11 @@ dependencies = [
     "inflect",
     "wetext",
     "regex",
+]
+
+[project.optional-dependencies]
+development = [
+    "safetensors>=0.4.0",
 ]
 
 [project.urls]

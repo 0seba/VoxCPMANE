@@ -56,6 +56,13 @@ pip install -U voxcpmane2
 For editable development from a source checkout, run
 `uv pip install --python '>=3.10,<3.13' -e .` from this directory.
 
+If you need to load raw VoxCPM2 `.safetensors` weights during development,
+install the optional development extra:
+
+```bash
+uv pip install --python '>=3.10,<3.13' -e '.[development]'
+```
+
 ## Run The Server
 
 ```bash

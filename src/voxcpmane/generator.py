@@ -11,6 +11,7 @@ from typing import Callable, Generator, Sequence
 import coremltools as ct
 import numpy as np
 import soundfile as sf
+from tokenizers import Tokenizer
 
 from ._coreml_utils import (
     get_feature_info,
@@ -19,7 +20,7 @@ from ._coreml_utils import (
 )
 from .audio_vae_decoder import AudioVAEDecoder
 from .audio_vae_encoder import AudioVAEEncoder
-from .embeddings import load_embed_tokens, load_embed_tokens_from_safetensors
+from .embeddings import load_embed_tokens
 from .feat_encoder import FeatEncoder
 from .lm import CoreMLMiniCPMLM
 from .locdit import CoreMLUnifiedCFM
@@ -375,35 +376,35 @@ class VoxCPM2Generator:
 
     def preload_tokenizer(self, hf_model_id: str = "openbmb/VoxCPM2") -> None:
         if not hasattr(self, "_tokenizer"):
-            from transformers import LlamaTokenizerFast
-
-            try:
-                self._tokenizer = LlamaTokenizerFast.from_pretrained(
-                    hf_model_id,
-                    local_files_only=True,
-                )
-            except Exception:
-                self._tokenizer = LlamaTokenizerFast.from_pretrained(hf_model_id)
+            self._tokenizer = Tokenizer.from_pretrained(hf_model_id)
+            self._unk_token_id = self._tokenizer.token_to_id("<unk>")
             self._multichar_chinese_tokens = {
                 token
-                for token in self._tokenizer.vocab.keys()
+                for token in self._tokenizer.get_vocab().keys()
                 if len(token) >= 2 and all("\u4e00" <= c <= "\u9fff" for c in token)
             }
+
+    def _token_to_id(self, token: str) -> int:
+        token_id = self._tokenizer.token_to_id(token)
+        if token_id is None:
+            token_id = self._unk_token_id
+        if token_id is None:
+            raise KeyError(f"token {token!r} is not in the tokenizer vocabulary")
+        return int(token_id)
 
     def _encode_text(self, text: str) -> np.ndarray:
         """Match upstream mask_multichar_chinese_tokens(tokenizer)(text)."""
         if not hasattr(self, "_tokenizer"):
             self.preload_tokenizer()
-        processed = []
-        for token in self._tokenizer.tokenize(text):
+        processed_ids = []
+        encoding = self._tokenizer.encode(text, add_special_tokens=False)
+        for token, token_id in zip(encoding.tokens, encoding.ids):
             clean_token = token.replace("▁", "")
             if clean_token in self._multichar_chinese_tokens:
-                processed.extend(list(clean_token))
+                processed_ids.extend(self._token_to_id(char) for char in clean_token)
             else:
-                processed.append(token)
-        return np.array(
-            self._tokenizer.convert_tokens_to_ids(processed), dtype=np.int32
-        )
+                processed_ids.append(int(token_id))
+        return np.array(processed_ids, dtype=np.int32)
 
     @classmethod
     def from_voxcpm(cls, model, model_dir: Path, **kwargs) -> VoxCPM2Generator:

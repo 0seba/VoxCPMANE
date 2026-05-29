@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from safetensors import safe_open
 
 DEFAULT_EMBEDDING_KEYS = (
     "tts_model.base_lm.embed_tokens.weight",
@@ -40,12 +39,20 @@ def load_embed_tokens_from_safetensors(
     key: str | None = None,
 ) -> np.ndarray:
     """Load the LM token embedding table from a safetensors file or directory."""
-
     keys = (key,) if key is not None else DEFAULT_EMBEDDING_KEYS
     suffixes = tuple(k for k in keys if k)
     candidates = list(_iter_safetensors_files(path))
     if not candidates:
         raise FileNotFoundError(f"no .safetensors files found under {path}")
+
+    try:
+        from safetensors import safe_open
+    except ImportError as exc:
+        raise ImportError(
+            "loading embeddings from .safetensors requires the optional "
+            "development dependency: install voxcpmane2[development] or provide "
+            "embed_tokens.npy in the model directory"
+        ) from exc
 
     available: list[str] = []
     for file in candidates:

@@ -984,27 +984,6 @@ wheels = [
 ]
 
 [[package]]
-name = "transformers"
-version = "5.8.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "regex" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/e6/4134ea2fbea322cddc7ffc94a0d8ee47fe32ce8e876b320cd37d88edfc4d/transformers-5.8.1.tar.gz", hash = "sha256:4dd5b6de4105725104d84fd6abd74b305f4debfc251b38c648ee5dd087cf543b", size = 8532019, upload-time = "2026-05-13T03:21:57.234Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/b1/8be7e7ef0b5200491312201918b6125ef9c9df9dd0f0240ccef9ac824e6b/transformers-5.8.1-py3-none-any.whl", hash = "sha256:5340fb95962162cdfdae5cc91d7f8fedd92ed75216c1154c5e1f590fcf56dd0e", size = 10632882, upload-time = "2026-05-13T03:21:52.876Z" },
-]
-
-[[package]]
 name = "typeguard"
 version = "4.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1068,7 +1047,7 @@ wheels = [
 
 [[package]]
 name = "voxcpmane2"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1081,14 +1060,18 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "regex" },
-    { name = "safetensors" },
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "soxr" },
+    { name = "tokenizers" },
     { name = "tqdm" },
-    { name = "transformers" },
     { name = "uvicorn" },
     { name = "wetext" },
+]
+
+[package.optional-dependencies]
+development = [
+    { name = "safetensors" },
 ]
 
 [package.metadata]
@@ -1102,15 +1085,16 @@ requires-dist = [
     { name = "ml-dtypes", specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=2" },
     { name = "regex" },
-    { name = "safetensors", specifier = ">=0.4.0" },
+    { name = "safetensors", marker = "extra == 'development'", specifier = ">=0.4.0" },
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "soxr", specifier = ">=1.0.0" },
+    { name = "tokenizers" },
     { name = "tqdm" },
-    { name = "transformers" },
     { name = "uvicorn" },
     { name = "wetext" },
 ]
+provides-extras = ["development"]
 
 [[package]]
 name = "wcwidth"
