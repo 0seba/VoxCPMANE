@@ -1,0 +1,258 @@
+{
+  "gil": {
+    "python": {
+      "implementation": "cpython",
+      "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+      "gil_enabled": true
+    },
+    "variants": [
+      {
+        "name": "async",
+        "flags": {
+          "lm_async_decode_load": true,
+          "lm_async_prefill_unload": true,
+          "prefill_audio_async": true,
+          "prefill_audio_queue_size": 2,
+          "vae_async_decode": true,
+          "vae_decode_max_pending": 2
+        },
+        "summary": {
+          "runs": 5,
+          "wall_seconds": {
+            "mean": 4.597113516597892,
+            "min": 4.169485624996014,
+            "max": 5.178211000005831
+          },
+          "ttfb_seconds": {
+            "mean": 2.044312116599758,
+            "min": 1.5978502090001712,
+            "max": 2.5838818330084905
+          },
+          "first_ar_iteration_wall_seconds": {
+            "mean": 2.470604175000335,
+            "min": 2.0075775000004796,
+            "max": 3.0431793330062646
+          },
+          "prefill_seconds": {
+            "mean": 1.8508701584039955,
+            "min": 1.3951582080044318,
+            "max": 2.387998417005292
+          },
+          "swap_to_decode_seconds": {
+            "mean": 9.00000159163028e-06,
+            "min": 8.000002708286047e-06,
+            "max": 1.012500433716923e-05
+          },
+          "decode_load_wait_seconds": {
+            "mean": 1.4400196960195899e-05,
+            "min": 1.287501072511077e-05,
+            "max": 1.624900323804468e-05
+          },
+          "first_ar_iteration_seconds": {
+            "mean": 0.6193713332002517,
+            "min": 0.5664565000042785,
+            "max": 0.6790116670017596
+          },
+          "generation_seconds": {
+            "mean": 2.0453594749997137,
+            "min": 1.9955248329933966,
+            "max": 2.1005390000063926
+          },
+          "generation_seconds_excluding_decode_wait": {
+            "mean": 2.0453450748027535,
+            "min": 1.9955107490095543,
+            "max": 2.1005247490102192
+          },
+          "audio_seconds": {
+            "mean": 2.56,
+            "min": 2.56,
+            "max": 2.56
+          },
+          "rtf": {
+            "mean": 0.7989685449217632,
+            "min": 0.7795018878880455,
+            "max": 0.8205230468774971
+          },
+          "rtf_excluding_decode_wait": {
+            "mean": 0.7989629198448256,
+            "min": 0.7794963863318571,
+            "max": 0.8205174800821169
+          }
+        }
+      }
+    ]
+  },
+  "nogil": {
+    "python": {
+      "implementation": "cpython",
+      "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+      "gil_enabled": false
+    },
+    "variants": [
+      {
+        "name": "async",
+        "flags": {
+          "lm_async_decode_load": true,
+          "lm_async_prefill_unload": true,
+          "prefill_audio_async": true,
+          "prefill_audio_queue_size": 2,
+          "vae_async_decode": true,
+          "vae_decode_max_pending": 2
+        },
+        "summary": {
+          "runs": 5,
+          "wall_seconds": {
+            "mean": 4.326759458202287,
+            "min": 3.4705175000126474,
+            "max": 5.030081542005064
+          },
+          "ttfb_seconds": {
+            "mean": 1.6028023248014507,
+            "min": 1.0260643330111634,
+            "max": 1.9632413749932311
+          },
+          "first_ar_iteration_wall_seconds": {
+            "mean": 2.252384891398833,
+            "min": 1.5597829580074176,
+            "max": 3.0110708749998594
+          },
+          "prefill_seconds": {
+            "mean": 0.9361765414068941,
+            "min": 0.3747796250099782,
+            "max": 1.3196729580085957
+          },
+          "swap_to_decode_seconds": {
+            "mean": 7.733397069387138e-06,
+            "min": 7.208000170066953e-06,
+            "max": 8.25000461190939e-06
+          },
+          "decode_load_wait_seconds": {
+            "mean": 0.6137677666003583,
+            "min": 0.5620351249963278,
+            "max": 0.6848267909954302
+          },
+          "first_ar_iteration_seconds": {
+            "mean": 1.3157982998003717,
+            "min": 1.1389109169977019,
+            "max": 1.805744915996911
+          },
+          "generation_seconds": {
+            "mean": 2.66437460820307,
+            "min": 2.503287375002401,
+            "max": 3.1441348329972243
+          },
+          "generation_seconds_excluding_decode_wait": {
+            "mean": 2.050606841602712,
+            "min": 1.8975252489908598,
+            "max": 2.5820997080008965
+          },
+          "audio_seconds": {
+            "mean": 2.56,
+            "min": 2.56,
+            "max": 2.56
+          },
+          "rtf": {
+            "mean": 1.0407713313293243,
+            "min": 0.9778466308603129,
+            "max": 1.2281776691395407
+          },
+          "rtf_excluding_decode_wait": {
+            "mean": 0.8010182975010594,
+            "min": 0.7412208003870546,
+            "max": 1.0086326984378502
+          }
+        }
+      }
+    ]
+  },
+  "rows": [
+    {
+      "variant": "async",
+      "metric": "ttfb_seconds",
+      "gil_mean": 2.044312116599758,
+      "nogil_mean": 1.6028023248014507,
+      "delta": -0.4415097917983073,
+      "nogil_vs_gil_percent": -21.596985519640565
+    },
+    {
+      "variant": "async",
+      "metric": "first_ar_iteration_wall_seconds",
+      "gil_mean": 2.470604175000335,
+      "nogil_mean": 2.252384891398833,
+      "delta": -0.21821928360150178,
+      "nogil_vs_gil_percent": -8.83262830240592
+    },
+    {
+      "variant": "async",
+      "metric": "prefill_seconds",
+      "gil_mean": 1.8508701584039955,
+      "nogil_mean": 0.9361765414068941,
+      "delta": -0.9146936169971014,
+      "nogil_vs_gil_percent": -49.41965339080519
+    },
+    {
+      "variant": "async",
+      "metric": "swap_to_decode_seconds",
+      "gil_mean": 9.00000159163028e-06,
+      "nogil_mean": 7.733397069387138e-06,
+      "delta": -1.2666045222431425e-06,
+      "nogil_vs_gil_percent": -14.073381091632752
+    },
+    {
+      "variant": "async",
+      "metric": "decode_load_wait_seconds",
+      "gil_mean": 1.4400196960195899e-05,
+      "nogil_mean": 0.6137677666003583,
+      "delta": 0.6137533664033981,
+      "nogil_vs_gil_percent": 4262117.85922023
+    },
+    {
+      "variant": "async",
+      "metric": "first_ar_iteration_seconds",
+      "gil_mean": 0.6193713332002517,
+      "nogil_mean": 1.3157982998003717,
+      "delta": 0.6964269666001199,
+      "nogil_vs_gil_percent": 112.44094281886228
+    },
+    {
+      "variant": "async",
+      "metric": "generation_seconds",
+      "gil_mean": 2.0453594749997137,
+      "nogil_mean": 2.66437460820307,
+      "delta": 0.6190151332033564,
+      "nogil_vs_gil_percent": 30.264368721955016
+    },
+    {
+      "variant": "async",
+      "metric": "generation_seconds_excluding_decode_wait",
+      "gil_mean": 2.0453450748027535,
+      "nogil_mean": 2.050606841602712,
+      "delta": 0.0052617667999586,
+      "nogil_vs_gil_percent": 0.2572557005064757
+    },
+    {
+      "variant": "async",
+      "metric": "wall_seconds",
+      "gil_mean": 4.597113516597892,
+      "nogil_mean": 4.326759458202287,
+      "delta": -0.270354058395605,
+      "nogil_vs_gil_percent": -5.88095241545572
+    },
+    {
+      "variant": "async",
+      "metric": "rtf",
+      "gil_mean": 0.7989685449217632,
+      "nogil_mean": 1.0407713313293243,
+      "delta": 0.24180278640756114,
+      "nogil_vs_gil_percent": 30.264368721955016
+    },
+    {
+      "variant": "async",
+      "metric": "rtf_excluding_decode_wait",
+      "gil_mean": 0.7989629198448256,
+      "nogil_mean": 0.8010182975010594,
+      "delta": 0.002055377656233759,
+      "nogil_vs_gil_percent": 0.2572557005064757
+    }
+  ]
+}

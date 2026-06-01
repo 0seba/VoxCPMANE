@@ -1,0 +1,63 @@
+{
+  "python": {
+    "implementation": "cpython",
+    "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+    "gil_enabled": true
+  },
+  "variants": [
+    {
+      "name": "async",
+      "flags": {
+        "lm_async_decode_load": true,
+        "lm_async_prefill_unload": true,
+        "prefill_audio_async": true,
+        "prefill_audio_queue_size": 2,
+        "vae_async_decode": true,
+        "vae_decode_max_pending": 2
+      },
+      "summary": {
+        "runs": 5,
+        "wall_seconds": {
+          "mean": 4.411949325198657,
+          "min": 4.199454000001424,
+          "max": 4.939013041992439
+        },
+        "ttfb_seconds": {
+          "mean": 1.8348178500018548,
+          "min": 1.5678693340014433,
+          "max": 2.3679640000045765
+        },
+        "prefill_seconds": {
+          "mean": 1.6438772913970752,
+          "min": 1.377313958000741,
+          "max": 2.1712453329964774
+        },
+        "swap_to_decode_seconds": {
+          "mean": 8.058399544097483e-06,
+          "min": 7.1250105975195765e-06,
+          "max": 9.208990377373993e-06
+        },
+        "decode_load_wait_seconds": {
+          "mean": 1.3366801431402564e-05,
+          "min": 1.1833995813503861e-05,
+          "max": 1.4208999346010387e-05
+        },
+        "generation_seconds": {
+          "mean": 2.0234870418003994,
+          "min": 2.0071427920047427,
+          "max": 2.0374490419926587
+        },
+        "audio_seconds": {
+          "mean": 2.56,
+          "min": 2.56,
+          "max": 2.56
+        },
+        "rtf": {
+          "mean": 0.790424625703281,
+          "min": 0.7840401531268526,
+          "max": 0.7958785320283823
+        }
+      }
+    }
+  ]
+}

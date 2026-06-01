@@ -1,0 +1,104 @@
+🚀 Downloading models from HuggingFace: seba/VoxCPM2ANE-Preview
+
+Fetching 215 files:   0%|          | 0/215 [00:00<?, ?it/s]
+Fetching 215 files: 100%|██████████| 215/215 [00:00<00:00, 192645.88it/s]
+
+Fetching 168 files:   0%|          | 0/168 [00:00<?, ?it/s]
+Fetching 168 files: 100%|██████████| 168/168 [00:00<00:00, 17084.74it/s]
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/base_lm_multifunction.mlmodelc
+   ✓ base_lm default: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/base_lm_multifunction.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/residual_lm_fused_multifunction.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/locdit_p4_c4.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/audio_vae_encoder.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/feat_encoder.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/audio_vae_decoder_lf4.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/fsq_s4.mlmodelc
+   ✓ Prioritizing compiled model: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/projections.mlmodelc
+Loading CoreML models via VoxCPM2Generator...
+CoreML resolved model paths:
+  vae_encoder: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/audio_vae_encoder.mlmodelc
+  feat_encoder: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/feat_encoder.mlmodelc
+  base_lm: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/base_lm_multifunction.mlmodelc
+  residual_lm: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/residual_lm_fused_multifunction.mlmodelc
+  locdit: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/locdit_p4_c4.mlmodelc
+  vae_decoder: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/audio_vae_decoder_lf4.mlmodelc
+  fsq: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/fsq_s4.mlmodelc
+  projections: /Users/seba/.cache/huggingface/hub/models--seba--VoxCPM2ANE-Preview/snapshots/def350ecae1aa3e4028970a5eae8faa7b3800d40/projections.mlmodelc
+✅ Models loaded successfully.
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 4.2606184580072295, "ttfb_seconds": 2.05029620800633, "prefill_seconds": 1.2764272920030635, "prefill_stage_seconds": {"text_tokens": 0.00011087500024586916, "audio_features": 0.002055417004157789, "sequence_build": 8.329952834174037e-07, "lm_prefix_cache_restore": 6.250047590583563e-07, "stream_base_lm": 0.39818929199827835, "residual_lm": 0.8760437909950269, "lm_prefix_cache_save": 2.5999994250014424e-05}, "swap_to_decode_seconds": 1.7166996258310974e-05, "decode_load_wait_seconds": 1.4166987966746092e-05, "decode_load_wait_by_lm": {"base_lm": 6.791990017518401e-06, "residual_lm": 7.374997949227691e-06}, "prefill_cleanup_wait_seconds": 1.9169965526089072e-06, "generation_seconds": 2.2549625420069788, "audio_seconds": 2.56, "rtf": 0.8808447429714761, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 1.2764272920030635, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 0.00011087500024586916, "audio_features": 0.002055417004157789, "sequence_build": 8.329952834174037e-07, "lm_prefix_cache_restore": 6.250047590583563e-07, "stream_base_lm": 0.39818929199827835, "residual_lm": 0.8760437909950269, "lm_prefix_cache_save": 2.5999994250014424e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101260.691774041}}, {"kind": "generation_start", "values": {"at": 101260.691791208, "swap_to_decode_seconds": 1.7166996258310974e-05}}, {"kind": "decode_ready", "values": {"at": 101261.449988791, "decode_load_wait_seconds": 6.791990017518401e-06, "decode_load_wait_by_lm": {"base_lm": 6.791990017518401e-06}}}, {"kind": "decode_ready", "values": {"at": 101261.525804166, "decode_load_wait_seconds": 7.374997949227691e-06, "decode_load_wait_by_lm": {"residual_lm": 7.374997949227691e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.2549625420069788, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101262.946763166, "prefill_cleanup_wait_seconds": 1.9169965526089072e-06}}], "warmup": true, "index": 0}
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 4.340725250003743, "ttfb_seconds": 1.7920585410029162, "prefill_seconds": 1.6030143329990096, "prefill_stage_seconds": {"text_tokens": 5.374998727347702e-05, "audio_features": 0.016457041012472473, "sequence_build": 8.749921107664704e-07, "lm_prefix_cache_restore": 7.920025382190943e-07, "stream_base_lm": 0.7706688750040485, "residual_lm": 0.8158064169983845, "lm_prefix_cache_save": 2.5999994250014424e-05}, "swap_to_decode_seconds": 8.500006515532732e-06, "decode_load_wait_seconds": 1.370901009067893e-05, "decode_load_wait_by_lm": {"base_lm": 6.6250067902728915e-06, "residual_lm": 7.084003300406039e-06}, "prefill_cleanup_wait_seconds": 2.959000994451344e-06, "generation_seconds": 2.033079667002312, "audio_seconds": 2.56, "rtf": 0.7941717449227781, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 1.6030143329990096, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 5.374998727347702e-05, "audio_features": 0.016457041012472473, "sequence_build": 8.749921107664704e-07, "lm_prefix_cache_restore": 7.920025382190943e-07, "stream_base_lm": 0.7706688750040485, "residual_lm": 0.8158064169983845, "lm_prefix_cache_save": 2.5999994250014424e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101265.263800416}}, {"kind": "generation_start", "values": {"at": 101265.263808916, "swap_to_decode_seconds": 8.500006515532732e-06}}, {"kind": "decode_ready", "values": {"at": 101265.452477333, "decode_load_wait_seconds": 6.6250067902728915e-06, "decode_load_wait_by_lm": {"base_lm": 6.6250067902728915e-06}}}, {"kind": "decode_ready", "values": {"at": 101265.871912541, "decode_load_wait_seconds": 7.084003300406039e-06, "decode_load_wait_by_lm": {"residual_lm": 7.084003300406039e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.033079667002312, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101267.29690075, "prefill_cleanup_wait_seconds": 2.959000994451344e-06}}], "warmup": false, "index": 1}
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 4.951014708000002, "ttfb_seconds": 1.6619790830009151, "prefill_seconds": 1.4766307910031173, "prefill_stage_seconds": {"text_tokens": 4.0790997445583344e-05, "audio_features": 0.007950917002744973, "sequence_build": 5.00003807246685e-07, "lm_prefix_cache_restore": 4.5799242798238993e-07, "stream_base_lm": 0.7496371250017546, "residual_lm": 0.7189757919986732, "lm_prefix_cache_save": 2.5000001187436283e-05}, "swap_to_decode_seconds": 9.041992598213255e-06, "decode_load_wait_seconds": 1.504101965110749e-05, "decode_load_wait_by_lm": {"base_lm": 6.541013135574758e-06, "residual_lm": 8.500006515532732e-06}, "prefill_cleanup_wait_seconds": 8.330098353326321e-07, "generation_seconds": 2.818364708000445, "audio_seconds": 2.56, "rtf": 1.1009237140626738, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 1.4766307910031173, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 4.0790997445583344e-05, "audio_features": 0.007950917002744973, "sequence_build": 5.00003807246685e-07, "lm_prefix_cache_restore": 4.5799242798238993e-07, "stream_base_lm": 0.7496371250017546, "residual_lm": 0.7189757919986732, "lm_prefix_cache_save": 2.5000001187436283e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101269.478167416}}, {"kind": "generation_start", "values": {"at": 101269.478176458, "swap_to_decode_seconds": 9.041992598213255e-06}}, {"kind": "decode_ready", "values": {"at": 101269.663204041, "decode_load_wait_seconds": 6.541013135574758e-06, "decode_load_wait_by_lm": {"base_lm": 6.541013135574758e-06}}}, {"kind": "decode_ready", "values": {"at": 101270.869074125, "decode_load_wait_seconds": 8.500006515532732e-06, "decode_load_wait_by_lm": {"residual_lm": 8.500006515532732e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.818364708000445, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101272.296547541, "prefill_cleanup_wait_seconds": 8.330098353326321e-07}}], "warmup": false, "index": 2}
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 5.02636975000496, "ttfb_seconds": 2.5157540000072913, "prefill_seconds": 2.3273881249915576, "prefill_stage_seconds": {"text_tokens": 6.374999065883458e-05, "audio_features": 0.0009731250029290095, "sequence_build": 7.920025382190943e-07, "lm_prefix_cache_restore": 6.67001586407423e-07, "stream_base_lm": 1.6065635830018437, "residual_lm": 0.7197610829898622, "lm_prefix_cache_save": 2.487500023562461e-05}, "swap_to_decode_seconds": 8.207993232645094e-06, "decode_load_wait_seconds": 1.4542005374096334e-05, "decode_load_wait_by_lm": {"base_lm": 7.2920083766803145e-06, "residual_lm": 7.2499969974160194e-06}, "prefill_cleanup_wait_seconds": 1.2499949662014842e-06, "generation_seconds": 2.0075095829961356, "audio_seconds": 2.56, "rtf": 0.7841834308578655, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 2.3273881249915576, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 6.374999065883458e-05, "audio_features": 0.0009731250029290095, "sequence_build": 7.920025382190943e-07, "lm_prefix_cache_restore": 6.67001586407423e-07, "stream_base_lm": 1.6065635830018437, "residual_lm": 0.7197610829898622, "lm_prefix_cache_save": 2.487500023562461e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101275.28020325}}, {"kind": "generation_start", "values": {"at": 101275.280211458, "swap_to_decode_seconds": 8.207993232645094e-06}}, {"kind": "decode_ready", "values": {"at": 101275.468072041, "decode_load_wait_seconds": 7.2920083766803145e-06, "decode_load_wait_by_lm": {"base_lm": 7.2920083766803145e-06}}}, {"kind": "decode_ready", "values": {"at": 101275.860734458, "decode_load_wait_seconds": 7.2499969974160194e-06, "decode_load_wait_by_lm": {"residual_lm": 7.2499969974160194e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.0075095829961356, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101277.287729833, "prefill_cleanup_wait_seconds": 1.2499949662014842e-06}}], "warmup": false, "index": 3}
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 4.166576667004847, "ttfb_seconds": 1.664237167002284, "prefill_seconds": 1.473811208998086, "prefill_stage_seconds": {"text_tokens": 4.716700641438365e-05, "audio_features": 0.0007453750004060566, "sequence_build": 5.829933797940612e-07, "lm_prefix_cache_restore": 5.00003807246685e-07, "stream_base_lm": 0.7294521669973619, "residual_lm": 0.7435410829930333, "lm_prefix_cache_save": 2.416700590401888e-05}, "swap_to_decode_seconds": 7.708993507549167e-06, "decode_load_wait_seconds": 1.3833006960339844e-05, "decode_load_wait_by_lm": {"base_lm": 7.042006473056972e-06, "residual_lm": 6.791000487282872e-06}, "prefill_cleanup_wait_seconds": 1.2500095181167126e-06, "generation_seconds": 2.0180670830013696, "audio_seconds": 2.56, "rtf": 0.78830745429741, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 1.473811208998086, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 4.716700641438365e-05, "audio_features": 0.0007453750004060566, "sequence_build": 5.829933797940612e-07, "lm_prefix_cache_restore": 5.00003807246685e-07, "stream_base_lm": 0.7294521669973619, "residual_lm": 0.7435410829930333, "lm_prefix_cache_save": 2.416700590401888e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101279.452785916}}, {"kind": "generation_start", "values": {"at": 101279.452793625, "swap_to_decode_seconds": 7.708993507549167e-06}}, {"kind": "decode_ready", "values": {"at": 101279.642990041, "decode_load_wait_seconds": 7.042006473056972e-06, "decode_load_wait_by_lm": {"base_lm": 7.042006473056972e-06}}}, {"kind": "decode_ready", "values": {"at": 101280.051202208, "decode_load_wait_seconds": 6.791000487282872e-06, "decode_load_wait_by_lm": {"residual_lm": 6.791000487282872e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.0180670830013696, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101281.4708695, "prefill_cleanup_wait_seconds": 1.2500095181167126e-06}}], "warmup": false, "index": 4}
+🎤 generate_audio_chunks: mode=continuation, text='Hello Patrick I am Spongebob Squarepants'..., max_len=76, cfg=2.0, steps=10
+{"variant": "async", "wall_seconds": 4.926780624999083, "ttfb_seconds": 2.3945165000041015, "prefill_seconds": 2.20378024999809, "prefill_stage_seconds": {"text_tokens": 4.445899685379118e-05, "audio_features": 0.0007245830056490377, "sequence_build": 4.5799242798238993e-07, "lm_prefix_cache_restore": 5.00003807246685e-07, "stream_base_lm": 1.469184250003309, "residual_lm": 0.733796333995997, "lm_prefix_cache_save": 2.937500539701432e-05}, "swap_to_decode_seconds": 7.499998901039362e-06, "decode_load_wait_seconds": 1.3165990822017193e-05, "decode_load_wait_by_lm": {"base_lm": 6.207992555573583e-06, "residual_lm": 6.95799826644361e-06}, "prefill_cleanup_wait_seconds": 9.999930625781417e-07, "generation_seconds": 2.022147458003019, "audio_seconds": 2.56, "rtf": 0.7899013507824293, "chunks": 16, "samples": 122880, "events": [{"kind": "prefill", "values": {"prefill_seconds": 2.20378024999809, "prefill_tokens": 44, "prefill_stage_seconds": {"text_tokens": 4.445899685379118e-05, "audio_features": 0.0007245830056490377, "sequence_build": 4.5799242798238993e-07, "lm_prefix_cache_restore": 5.00003807246685e-07, "stream_base_lm": 1.469184250003309, "residual_lm": 0.733796333995997, "lm_prefix_cache_save": 2.937500539701432e-05}, "prefill_text_tokens": 25, "prefill_audio_tokens": 19, "prefill_reference_audio_tokens": 0, "prefill_prompt_audio_tokens": 19, "prefill_lm_prefix_cache": false, "prefill_lm_prefix_tokens": 0, "at": 101284.349410583}}, {"kind": "generation_start", "values": {"at": 101284.349418083, "swap_to_decode_seconds": 7.499998901039362e-06}}, {"kind": "decode_ready", "values": {"at": 101284.539918916, "decode_load_wait_seconds": 6.207992555573583e-06, "decode_load_wait_by_lm": {"base_lm": 6.207992555573583e-06}}}, {"kind": "decode_ready", "values": {"at": 101284.947928416, "decode_load_wait_seconds": 6.95799826644361e-06, "decode_load_wait_by_lm": {"residual_lm": 6.95799826644361e-06}}}, {"kind": "final", "values": {"status": "completed", "generation_seconds": 2.022147458003019, "audio_seconds": 2.56}}, {"kind": "prefill_cleanup", "values": {"at": 101286.371571833, "prefill_cleanup_wait_seconds": 9.999930625781417e-07}}], "warmup": false, "index": 5}
+{
+  "summary": {
+    "python": {
+      "implementation": "cpython",
+      "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+      "gil_enabled": true
+    },
+    "variants": [
+      {
+        "name": "async",
+        "flags": {
+          "lm_async_decode_load": true,
+          "lm_async_prefill_unload": true,
+          "prefill_audio_async": true,
+          "prefill_audio_queue_size": 2,
+          "vae_async_decode": true,
+          "vae_decode_max_pending": 2
+        },
+        "summary": {
+          "runs": 5,
+          "wall_seconds": {
+            "mean": 4.682293400002527,
+            "min": 4.166576667004847,
+            "max": 5.02636975000496
+          },
+          "ttfb_seconds": {
+            "mean": 2.0057090582035015,
+            "min": 1.6619790830009151,
+            "max": 2.5157540000072913
+          },
+          "prefill_seconds": {
+            "mean": 1.816924941597972,
+            "min": 1.473811208998086,
+            "max": 2.3273881249915576
+          },
+          "swap_to_decode_seconds": {
+            "mean": 8.191796950995922e-06,
+            "min": 7.499998901039362e-06,
+            "max": 9.041992598213255e-06
+          },
+          "decode_load_wait_seconds": {
+            "mean": 1.4058206579647958e-05,
+            "min": 1.3165990822017193e-05,
+            "max": 1.504101965110749e-05
+          },
+          "generation_seconds": {
+            "mean": 2.179833699800656,
+            "min": 2.0075095829961356,
+            "max": 2.818364708000445
+          },
+          "audio_seconds": {
+            "mean": 2.56,
+            "min": 2.56,
+            "max": 2.56
+          },
+          "rtf": {
+            "mean": 0.8514975389846313,
+            "min": 0.7841834308578655,
+            "max": 1.1009237140626738
+          }
+        }
+      }
+    ]
+  }
+}

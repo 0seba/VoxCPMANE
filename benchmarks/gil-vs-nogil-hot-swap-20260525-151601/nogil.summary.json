@@ -1,0 +1,83 @@
+{
+  "python": {
+    "implementation": "cpython",
+    "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+    "gil_enabled": false
+  },
+  "variants": [
+    {
+      "name": "async",
+      "flags": {
+        "lm_async_decode_load": true,
+        "lm_async_prefill_unload": true,
+        "prefill_audio_async": true,
+        "prefill_audio_queue_size": 2,
+        "vae_async_decode": true,
+        "vae_decode_max_pending": 2
+      },
+      "summary": {
+        "runs": 5,
+        "wall_seconds": {
+          "mean": 4.326759458202287,
+          "min": 3.4705175000126474,
+          "max": 5.030081542005064
+        },
+        "ttfb_seconds": {
+          "mean": 1.6028023248014507,
+          "min": 1.0260643330111634,
+          "max": 1.9632413749932311
+        },
+        "first_ar_iteration_wall_seconds": {
+          "mean": 2.252384891398833,
+          "min": 1.5597829580074176,
+          "max": 3.0110708749998594
+        },
+        "prefill_seconds": {
+          "mean": 0.9361765414068941,
+          "min": 0.3747796250099782,
+          "max": 1.3196729580085957
+        },
+        "swap_to_decode_seconds": {
+          "mean": 7.733397069387138e-06,
+          "min": 7.208000170066953e-06,
+          "max": 8.25000461190939e-06
+        },
+        "decode_load_wait_seconds": {
+          "mean": 0.6137677666003583,
+          "min": 0.5620351249963278,
+          "max": 0.6848267909954302
+        },
+        "first_ar_iteration_seconds": {
+          "mean": 1.3157982998003717,
+          "min": 1.1389109169977019,
+          "max": 1.805744915996911
+        },
+        "generation_seconds": {
+          "mean": 2.66437460820307,
+          "min": 2.503287375002401,
+          "max": 3.1441348329972243
+        },
+        "generation_seconds_excluding_decode_wait": {
+          "mean": 2.050606841602712,
+          "min": 1.8975252489908598,
+          "max": 2.5820997080008965
+        },
+        "audio_seconds": {
+          "mean": 2.56,
+          "min": 2.56,
+          "max": 2.56
+        },
+        "rtf": {
+          "mean": 1.0407713313293243,
+          "min": 0.9778466308603129,
+          "max": 1.2281776691395407
+        },
+        "rtf_excluding_decode_wait": {
+          "mean": 0.8010182975010594,
+          "min": 0.7412208003870546,
+          "max": 1.0086326984378502
+        }
+      }
+    }
+  ]
+}

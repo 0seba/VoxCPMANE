@@ -1,0 +1,186 @@
+{
+  "gil": {
+    "python": {
+      "implementation": "cpython",
+      "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+      "gil_enabled": true
+    },
+    "variants": [
+      {
+        "name": "async",
+        "flags": {
+          "lm_async_decode_load": true,
+          "lm_async_prefill_unload": true,
+          "prefill_audio_async": true,
+          "prefill_audio_queue_size": 2,
+          "vae_async_decode": true,
+          "vae_decode_max_pending": 2
+        },
+        "summary": {
+          "runs": 5,
+          "wall_seconds": {
+            "mean": 4.411949325198657,
+            "min": 4.199454000001424,
+            "max": 4.939013041992439
+          },
+          "ttfb_seconds": {
+            "mean": 1.8348178500018548,
+            "min": 1.5678693340014433,
+            "max": 2.3679640000045765
+          },
+          "prefill_seconds": {
+            "mean": 1.6438772913970752,
+            "min": 1.377313958000741,
+            "max": 2.1712453329964774
+          },
+          "swap_to_decode_seconds": {
+            "mean": 8.058399544097483e-06,
+            "min": 7.1250105975195765e-06,
+            "max": 9.208990377373993e-06
+          },
+          "decode_load_wait_seconds": {
+            "mean": 1.3366801431402564e-05,
+            "min": 1.1833995813503861e-05,
+            "max": 1.4208999346010387e-05
+          },
+          "generation_seconds": {
+            "mean": 2.0234870418003994,
+            "min": 2.0071427920047427,
+            "max": 2.0374490419926587
+          },
+          "audio_seconds": {
+            "mean": 2.56,
+            "min": 2.56,
+            "max": 2.56
+          },
+          "rtf": {
+            "mean": 0.790424625703281,
+            "min": 0.7840401531268526,
+            "max": 0.7958785320283823
+          }
+        }
+      }
+    ]
+  },
+  "nogil": {
+    "python": {
+      "implementation": "cpython",
+      "version": "3.14.2 free-threading build (main, Dec 17 2025, 21:08:58) [Clang 21.1.4 ]",
+      "gil_enabled": false
+    },
+    "variants": [
+      {
+        "name": "async",
+        "flags": {
+          "lm_async_decode_load": true,
+          "lm_async_prefill_unload": true,
+          "prefill_audio_async": true,
+          "prefill_audio_queue_size": 2,
+          "vae_async_decode": true,
+          "vae_decode_max_pending": 2
+        },
+        "summary": {
+          "runs": 5,
+          "wall_seconds": {
+            "mean": 4.190638083199156,
+            "min": 3.9045262080035172,
+            "max": 4.612633665994508
+          },
+          "ttfb_seconds": {
+            "mean": 1.4313584249990527,
+            "min": 1.0130546249856707,
+            "max": 1.956620875003864
+          },
+          "prefill_seconds": {
+            "mean": 0.7862529500009259,
+            "min": 0.38634545799868647,
+            "max": 1.304126749993884
+          },
+          "swap_to_decode_seconds": {
+            "mean": 7.557999924756586e-06,
+            "min": 6.66698906570673e-06,
+            "max": 8.333008736371994e-06
+          },
+          "decode_load_wait_seconds": {
+            "mean": 0.5918295250099618,
+            "min": 0.5643435830133967,
+            "max": 0.6272970420104684
+          },
+          "generation_seconds": {
+            "mean": 2.7252258169988637,
+            "min": 2.4615718750137603,
+            "max": 3.1325883749959758
+          },
+          "audio_seconds": {
+            "mean": 2.56,
+            "min": 2.56,
+            "max": 2.56
+          },
+          "rtf": {
+            "mean": 1.064541334765181,
+            "min": 0.9615515136772501,
+            "max": 1.223667333982803
+          }
+        }
+      }
+    ]
+  },
+  "rows": [
+    {
+      "variant": "async",
+      "metric": "ttfb_seconds",
+      "gil_mean": 1.8348178500018548,
+      "nogil_mean": 1.4313584249990527,
+      "delta": -0.4034594250028021,
+      "nogil_vs_gil_percent": -21.989072375897923
+    },
+    {
+      "variant": "async",
+      "metric": "prefill_seconds",
+      "gil_mean": 1.6438772913970752,
+      "nogil_mean": 0.7862529500009259,
+      "delta": -0.8576243413961493,
+      "nogil_vs_gil_percent": -52.170824786276086
+    },
+    {
+      "variant": "async",
+      "metric": "swap_to_decode_seconds",
+      "gil_mean": 8.058399544097483e-06,
+      "nogil_mean": 7.557999924756586e-06,
+      "delta": -5.003996193408968e-07,
+      "nogil_vs_gil_percent": -6.20966504083833
+    },
+    {
+      "variant": "async",
+      "metric": "decode_load_wait_seconds",
+      "gil_mean": 1.3366801431402564e-05,
+      "nogil_mean": 0.5918295250099618,
+      "delta": 0.5918161582085304,
+      "nogil_vs_gil_percent": 4427507.667003862
+    },
+    {
+      "variant": "async",
+      "metric": "generation_seconds",
+      "gil_mean": 2.0234870418003994,
+      "nogil_mean": 2.7252258169988637,
+      "delta": 0.7017387751984643,
+      "nogil_vs_gil_percent": 34.67967724537993
+    },
+    {
+      "variant": "async",
+      "metric": "wall_seconds",
+      "gil_mean": 4.411949325198657,
+      "nogil_mean": 4.190638083199156,
+      "delta": -0.22131124199950136,
+      "nogil_vs_gil_percent": -5.016178239752023
+    },
+    {
+      "variant": "async",
+      "metric": "rtf",
+      "gil_mean": 0.790424625703281,
+      "nogil_mean": 1.064541334765181,
+      "delta": 0.2741167090619001,
+      "nogil_vs_gil_percent": 34.67967724537993
+    }
+  ]
+}
