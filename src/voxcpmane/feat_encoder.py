@@ -99,6 +99,7 @@ class FeatEncoder:
         padded to ``chunk_patches`` and trimmed after concat.
         """
         B, T, P, D = patches.shape
+        n = B * T
 
         # (B, T, P, D) → (B*T, D, 1, P)
         flat = patches.reshape(B * T, P, D)
@@ -106,13 +107,20 @@ class FeatEncoder:
         flat = np.ascontiguousarray(flat[:, :, None, :], dtype=np.float32)
         out_flat = self._encode_flat(
             flat,
-            chunk_patches=self._select_chunk_patches(preferred_chunk_patches),
+            chunk_patches=self._select_chunk_patches(preferred_chunk_patches, n=n),
         )  # (N, H_lm, 1, 1)
         return out_flat.reshape(B, T, -1)
 
-    def _select_chunk_patches(self, preferred_chunk_patches: int | None) -> int:
+    def _select_chunk_patches(
+        self,
+        preferred_chunk_patches: int | None,
+        *,
+        n: int,
+    ) -> int:
         if preferred_chunk_patches is None:
-            return int(self.chunk_patches)
+            preferred_chunk_patches = (
+                self.prefill_chunk_patches if n > 1 else self.chunk_patches
+            )
         preferred = int(preferred_chunk_patches)
         if preferred in self.available_chunk_patches:
             return preferred

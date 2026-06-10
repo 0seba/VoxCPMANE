@@ -229,10 +229,10 @@ class VoxCPM2Generator:
         )
         self.lm_cache_length = self._resolve_lm_cache_length()
         if hasattr(self.base_lm, "model_path"):
-            base_lm_resolved = self.base_lm.model_path
+            base_lm_resolved = str(self.base_lm.model_path)
         elif hasattr(self.base_lm, "submodels"):
             base_lm_resolved = ", ".join(
-                getattr(submodel, "model_path", "<unknown>")
+                str(getattr(submodel, "model_path", "<unknown>"))
                 for submodel in self.base_lm.submodels
             )
         else:
@@ -866,11 +866,20 @@ class VoxCPM2Generator:
 
     def _lm_snapshot_shapes(self, lm: object) -> dict[str, tuple[int, ...]]:
         if getattr(lm, "is_chain", False):
-            shapes = {}
-            for idx, submodel in enumerate(getattr(lm, "submodels")):
+            merged: dict[str, tuple[int, ...]] = {}
+            for submodel in getattr(lm, "submodels"):
                 for name, shape in self._lm_snapshot_shapes(submodel).items():
-                    shapes[f"part_{idx}:{name}"] = shape
-            return shapes
+                    if name not in merged:
+                        merged[name] = shape
+                        continue
+                    previous = merged[name]
+                    if previous[1:] != shape[1:]:
+                        raise ValueError(
+                            f"chain state {name!r} shapes cannot be merged: "
+                            f"{previous} vs {shape}"
+                        )
+                    merged[name] = (previous[0] + shape[0], *previous[1:])
+            return merged
         return {
             str(name): tuple(shape)
             for name, shape in getattr(lm, "state_shapes", [])
@@ -1028,13 +1037,26 @@ class VoxCPM2Generator:
             if not getattr(lm, "unload_inactive_functions", False):
                 continue
             unloaded = False
-            for loaded_size in list(getattr(lm, "_models_by_chunk_size", {})):
-                if loaded_size != lm.chunk_size:
-                    lm._unload_function(
-                        loaded_size,
-                        event_name=f"decode/unload_function_s{loaded_size}",
-                    )
-                    unloaded = True
+            submodels = getattr(lm, "submodels", None)
+            if submodels is not None:
+                for submodel in submodels:
+                    for loaded_size in list(
+                        getattr(submodel, "_models_by_chunk_size", {})
+                    ):
+                        if loaded_size != submodel.chunk_size:
+                            submodel._unload_function(
+                                loaded_size,
+                                event_name=f"decode/unload_function_s{loaded_size}",
+                            )
+                            unloaded = True
+            else:
+                for loaded_size in list(getattr(lm, "_models_by_chunk_size", {})):
+                    if loaded_size != lm.chunk_size:
+                        lm._unload_function(
+                            loaded_size,
+                            event_name=f"decode/unload_function_s{loaded_size}",
+                        )
+                        unloaded = True
             if unloaded:
                 gc.collect()
 

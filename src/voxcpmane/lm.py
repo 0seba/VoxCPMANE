@@ -114,6 +114,18 @@ class CoreMLMiniCPMLM:
             self.input_channels = shapes[0][1]
             self.spatial_dim = shapes[0][2]
             self.chunk_size = shapes[0][3]
+            self.model = None
+            self.state = None
+            self.eager_load_functions = bool(eager_load_functions)
+            self.max_function_handles = int(max_function_handles)
+            self.unload_inactive_functions = bool(unload_inactive_functions)
+            self.keep_default_function_loaded = bool(keep_default_function_loaded)
+            self.lifecycle_events: list[tuple[str, float]] = []
+            self.idle_prefill_chunk_size = (
+                int(idle_prefill_chunk_size)
+                if idle_prefill_chunk_size is not None
+                else None
+            )
             self.cache_length = min(
                 (m.cache_length for m in self.submodels if m.cache_length is not None),
                 default=None,
@@ -335,12 +347,26 @@ class CoreMLMiniCPMLM:
     def snapshot_state_prefix(self, prefix_length: int) -> dict[str, np.ndarray]:
         """Read populated KV prefix state as float16 arrays in a flat dict."""
         if self.is_chain:
-            flat = {}
-            for idx, submodel in enumerate(self.submodels):
+            by_name: dict[str, list[np.ndarray]] = {}
+            expected_names = {
+                str(name)
+                for submodel in self.submodels
+                for name, _shape in getattr(submodel, "state_shapes", [])
+            }
+            for submodel in self.submodels:
                 sub_snapshot = submodel.snapshot_state_prefix(prefix_length)
                 for name, arr in sub_snapshot.items():
-                    flat[f"part_{idx}:{name}"] = arr
-            return flat
+                    by_name.setdefault(name, []).append(arr)
+            if set(by_name) != expected_names:
+                missing = sorted(expected_names - set(by_name))
+                extra = sorted(set(by_name) - expected_names)
+                raise ValueError(
+                    f"chain snapshot state names differ; missing={missing} extra={extra}"
+                )
+            return {
+                name: np.concatenate(parts, axis=0).astype(np.float16, copy=False)
+                for name, parts in by_name.items()
+            }
 
         if self.state is None:
             raise RuntimeError("cannot snapshot LM state before it has been created")
@@ -358,12 +384,25 @@ class CoreMLMiniCPMLM:
     def restore_state_prefix(self, snapshot: dict[str, np.ndarray], position: int) -> None:
         """Restore a float16 KV prefix snapshot into the persistent MLState."""
         if self.is_chain:
-            for idx, submodel in enumerate(self.submodels):
-                sub_snapshot = {
-                    name.split(":", 1)[1]: arr
-                    for name, arr in snapshot.items()
-                    if name.startswith(f"part_{idx}:")
-                }
+            split_snapshots = [dict() for _ in self.submodels]
+            for name, cached in snapshot.items():
+                offset = 0
+                cached_arr = np.asarray(cached)
+                for idx, submodel in enumerate(self.submodels):
+                    shape = submodel.state_shape_by_name.get(name)
+                    if shape is None:
+                        raise ValueError(
+                            f"state {name!r} is not present in chain part {idx}"
+                        )
+                    next_offset = offset + int(shape[0])
+                    split_snapshots[idx][name] = cached_arr[offset:next_offset]
+                    offset = next_offset
+                if offset != cached_arr.shape[0]:
+                    raise ValueError(
+                        f"state {name!r} first dimension has {cached_arr.shape[0]} "
+                        f"entries but split parts consumed {offset}"
+                    )
+            for submodel, sub_snapshot in zip(self.submodels, split_snapshots):
                 submodel.restore_state_prefix(sub_snapshot, position)
             self.current_position = position
             return
@@ -705,6 +744,10 @@ class CoreMLMiniCPMLM:
         self.current_position = 0
 
     def _active_or_default_model(self) -> Any:
+        if self.is_chain:
+            return [
+                submodel._active_or_default_model() for submodel in self.submodels
+            ]
         model = self._models_by_chunk_size.get(self.chunk_size)
         if model is not None:
             return model
@@ -735,6 +778,16 @@ class CoreMLMiniCPMLM:
         profiler: Optional[Any] = None,
         profile_prefix: str = "lm",
     ) -> ct.models.MLModel:
+        if self.is_chain:
+            return [
+                submodel._model_for_chunk_size(
+                    chunk_size,
+                    profiler=profiler,
+                    profile_prefix=f"{profile_prefix}/part{idx}",
+                )
+                for idx, submodel in enumerate(self.submodels)
+            ]
+
         model = self._models_by_chunk_size.get(chunk_size)
         if model is not None:
             if self.unload_inactive_functions:
@@ -799,6 +852,14 @@ class CoreMLMiniCPMLM:
         *,
         event_name: Optional[str] = None,
     ) -> None:
+        if self.is_chain:
+            for idx, submodel in enumerate(self.submodels):
+                submodel._unload_function(
+                    chunk_size,
+                    event_name=event_name,
+                )
+            return
+
         t0 = time.perf_counter()
         self._models_by_chunk_size.pop(chunk_size, None)
         self.lifecycle_events.append(

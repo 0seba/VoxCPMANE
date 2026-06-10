@@ -92,13 +92,48 @@ voxcpmane2-server \
 ```
 
 If `--model-dir` is omitted, the server downloads the CoreML model directory
-from `--repo-id`. If individual package paths are not supplied, components are
+from `--repo-id`, restricted to only the packages needed for the selected
+configuration. If individual package paths are not supplied, components are
 loaded from that downloaded directory. The default repo layout includes
 `config.json`, `embed_tokens.npy`, a small `.mlpackage` marker for CoreML repo
 recognition, and the runtime packages:
 `base_lm_multifunction.mlmodelc`, `residual_lm_fused_multifunction.mlmodelc`,
 and the compiled component packages at the repo root. Included voice caches live
 under `caches/`.
+
+On machines where the full BaseLM package fails to load on ANE, use the split
+BaseLM package:
+
+```bash
+voxcpmane2-server --split-base-lm
+```
+
+With `--split-base-lm`, the standard BaseLM package is not downloaded. The
+server downloads only the two split BaseLM packages and `config.json` from
+`seba/VoxCPMANE2-Debug-Models`, and downloads the remaining runtime components
+from the default model repo.
+
+M1 users who see a startup failure while loading BaseLM should try the
+`0.1.3b1` beta and start the server with `--split-base-lm`. The relevant error
+usually includes:
+
+```text
+ANE model load has failed for on-device compiled macho. Must re-compile the E5 bundle.
+RuntimeError: `MLModelConfiguration`'s `.functionName` property must be `nil`
+unless the model type is ML Program.
+```
+
+Install or upgrade to the beta with:
+
+```bash
+uv tool install --python '>=3.10,<3.13' --prerelease allow -U 'voxcpmane2==0.1.3b1'
+```
+
+Then run:
+
+```bash
+voxcpmane2-server --split-base-lm
+```
 
 ## Working Modes
 

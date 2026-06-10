@@ -57,12 +57,27 @@ except ImportError:
 
 
 REPO_ID = "seba/VoxCPM2ANE-Preview"
+SPLIT_BASE_LM_REPO_ID = "seba/VoxCPMANE2-Debug-Models"
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
 VOICE_CACHE_DIRS: list[str] = []
 CUSTOM_VOICE_CACHE_DIR = os.path.expanduser("~/.cache/ane_tts")
 PROMPT_DECODE_CONTEXT_PATCHES = 3
 LM_MULTIFUNCTION_PREFILL_LENGTHS = (1, 8, 16, 32, 64, 128)
+STANDARD_BASE_LM_COMPILED = "base_lm_multifunction.mlmodelc"
+SPLIT_BASE_LM_COMPILED_PARTS = (
+    "base_lm_multifunction_part0_of_2.mlmodelc",
+    "base_lm_multifunction_part1_of_2.mlmodelc",
+)
+CORE_MODEL_COMPILED_PACKAGES = (
+    "residual_lm_fused_multifunction.mlmodelc",
+    "locdit_p4_c4.mlmodelc",
+    "audio_vae_encoder.mlmodelc",
+    "feat_encoder.mlmodelc",
+    "audio_vae_decoder_lf4.mlmodelc",
+    "fsq_s4.mlmodelc",
+    "projections.mlmodelc",
+)
 RAW_AUDIO_FORMATS = {"wav", "flac"}
 PYDUB_AUDIO_FORMATS = {
     "mp3": ("mp3", "audio/mpeg"),
@@ -97,6 +112,36 @@ COMPONENT_PATH_SPECS = (
 generator: VoxCPM2Generator = None  # type: ignore[assignment]
 text_normalizer = None
 VOICE_FEATURE_CACHE_MEMORY: dict[tuple[str, str], np.ndarray] = {}
+
+
+def compiled_package_patterns(package_names: tuple[str, ...]) -> list[str]:
+    return [f"{name}/**" for name in package_names]
+
+
+def main_repo_download_patterns(*, split_base_lm: bool) -> list[str]:
+    packages = list(CORE_MODEL_COMPILED_PACKAGES)
+    if not split_base_lm:
+        packages.append(STANDARD_BASE_LM_COMPILED)
+    return [
+        "config.json",
+        "embed_tokens.npy",
+        "caches/**",
+        *compiled_package_patterns(tuple(packages)),
+    ]
+
+
+def split_base_lm_download_patterns() -> list[str]:
+    return [
+        "config.json",
+        *compiled_package_patterns(SPLIT_BASE_LM_COMPILED_PARTS),
+    ]
+
+
+def split_base_lm_paths(model_dir: str) -> list[str]:
+    return [
+        str(pathlib.Path(model_dir) / name).replace(".mlmodelc", ".mlpackage")
+        for name in SPLIT_BASE_LM_COMPILED_PARTS
+    ]
 
 
 def resolve_and_compile_path(
@@ -283,11 +328,13 @@ def pathify_gen_kwargs(gen_kwargs: dict) -> None:
 def load_model(
     model_dir: str | None = None,
     repo_id: str = REPO_ID,
+    split_base_lm_repo_id: str = SPLIT_BASE_LM_REPO_ID,
     included_voice_cache_dir: str | None = None,
     embedding_path: str | None = None,
     lm_mode: str = "single-length",
     lm_prefill_chunk_size: int | None = None,
     base_lm_splits: int = 2,
+    split_base_lm: bool = False,
     compiled_fallback_dir: str | None = None,
     vae_early_decode_steps: int = 16,
     vae_batch_decode_steps: int = 4,
@@ -308,9 +355,26 @@ def load_model(
     if model_dir is not None:
         MODEL_PATH_PREFIX = os.path.abspath(model_dir)
         print(f"📂 Using local model directory: {MODEL_PATH_PREFIX}")
+        if split_base_lm and base_lm_path is None:
+            base_lm_path = split_base_lm_paths(MODEL_PATH_PREFIX)
+            base_lm_splits = len(base_lm_path)
     else:
         print(f"🚀 Downloading models from HuggingFace: {repo_id}")
-        MODEL_PATH_PREFIX = snapshot_download(repo_id=repo_id)
+        MODEL_PATH_PREFIX = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=main_repo_download_patterns(split_base_lm=split_base_lm),
+        )
+        if split_base_lm and base_lm_path is None:
+            print(
+                "🚀 Downloading split BaseLM from HuggingFace: "
+                f"{split_base_lm_repo_id}"
+            )
+            split_base_lm_dir = snapshot_download(
+                repo_id=split_base_lm_repo_id,
+                allow_patterns=split_base_lm_download_patterns(),
+            )
+            base_lm_path = split_base_lm_paths(split_base_lm_dir)
+            base_lm_splits = len(base_lm_path)
 
     model_voice_cache_dir = os.path.join(MODEL_PATH_PREFIX, "caches")
     if included_voice_cache_dir is not None:
@@ -1405,6 +1469,15 @@ def main():
         help=f"Hugging Face model repo to download when --model-dir is omitted. Default: {REPO_ID}.",
     )
     parser.add_argument(
+        "--split-base-lm-repo-id",
+        type=str,
+        default=SPLIT_BASE_LM_REPO_ID,
+        help=(
+            "Hugging Face model repo containing split BaseLM debug artifacts. "
+            f"Default: {SPLIT_BASE_LM_REPO_ID}."
+        ),
+    )
+    parser.add_argument(
         "--embedding-path",
         type=str,
         default=None,
@@ -1416,7 +1489,8 @@ def main():
         choices=["single-length", "preload", "always-loaded", "hot-swap"],
         default="single-length",
         help=(
-            "Unified LM prefill and decode mode behavior: 'single-length' (use same length for "
+            "Unified LM prefill and decode mode behavior. Default: "
+            "'single-length'. 'single-length' (use same length for "
             "prefill and decode, restrict to selected prefill size), 'preload' (preload length 1 "
             "and prefill chunk size at startup, unload prefill size during decode, reload on idle), "
             "'always-loaded' (preload length 1 and prefill chunk size and keep both resident), "
@@ -1442,6 +1516,16 @@ def main():
         help=(
             "Number of fp16 BaseLM split packages under --model-dir. "
             "VoxCPM2 fp16 should use 2."
+        ),
+    )
+    parser.add_argument(
+        "--split-base-lm",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the 2-part multifunction BaseLM split. When downloading from "
+            "Hugging Face, the full BaseLM is skipped and only the split BaseLM "
+            "packages are downloaded from --split-base-lm-repo-id."
         ),
     )
     parser.add_argument(
