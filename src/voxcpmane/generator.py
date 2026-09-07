@@ -77,8 +77,10 @@ class VoxCPM2Generator:
         lm_startup_decode_warmup_repeats: int = 0,
         vae_early_decode_steps: int = 16,
         vae_batch_decode_steps: int = 4,
+        lm_cache_profile: str | None = None,
     ):
         mdir = model_dir
+        self.lm_cache_profile = lm_cache_profile
         compiled_dir = (
             compiled_fallback_dir.resolve()
             if compiled_fallback_dir is not None
@@ -927,6 +929,7 @@ class VoxCPM2Generator:
                 arrays[f"residual:{k}"] = np.asarray(v, dtype=np.float16)
 
             metadata = {
+                "model_profile": getattr(self, "lm_cache_profile", None),
                 "version": 2,
                 "prefix_length": int(prefix_length),
             }
@@ -947,6 +950,8 @@ class VoxCPM2Generator:
         try:
             with np.load(cache_path, allow_pickle=False) as data:
                 metadata = json.loads(str(data["__metadata__"].item()))
+                if metadata.get("model_profile") != getattr(self, "lm_cache_profile", None):
+                    return False
                 if int(metadata.get("prefix_length", -1)) != int(prefix_length):
                     return False
                 if int(metadata.get("version", 1)) != 2:

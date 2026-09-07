@@ -32,6 +32,8 @@ import aiofiles
 from huggingface_hub import snapshot_download
 import asyncio
 import argparse
+import platform
+import subprocess
 import ftfy
 
 from .generator import VoxCPM2Generator
@@ -58,6 +60,12 @@ except ImportError:
 
 REPO_ID = "seba/VoxCPM2ANE-Preview"
 SPLIT_BASE_LM_REPO_ID = "seba/VoxCPMANE2-Debug-Models"
+M5_MAX_LM_REVISION = "3a33ff35d350da2ac3d562dafc8e930faeeae59f"
+M5_MAX_CACHE_PROFILE = f"cached-mask-{M5_MAX_LM_REVISION}"
+M5_MAX_LM_PACKAGES = (
+    "base_lm_multifunction.mlmodelc",
+    "residual_lm_fused_multifunction.mlmodelc",
+)
 MODEL_PATH_PREFIX = ""
 VOICE_CACHE_DIR = ""
 VOICE_CACHE_DIRS: list[str] = []
@@ -118,9 +126,13 @@ def compiled_package_patterns(package_names: tuple[str, ...]) -> list[str]:
     return [f"{name}/**" for name in package_names]
 
 
-def main_repo_download_patterns(*, split_base_lm: bool) -> list[str]:
+def main_repo_download_patterns(
+    *, split_base_lm: bool, m5_max_compat: bool = False
+) -> list[str]:
     packages = list(CORE_MODEL_COMPILED_PACKAGES)
-    if not split_base_lm:
+    if m5_max_compat:
+        packages.remove("residual_lm_fused_multifunction.mlmodelc")
+    if not split_base_lm and not m5_max_compat:
         packages.append(STANDARD_BASE_LM_COMPILED)
     return [
         "config.json",
@@ -139,9 +151,27 @@ def split_base_lm_download_patterns() -> list[str]:
 
 def split_base_lm_paths(model_dir: str) -> list[str]:
     return [
-        str(pathlib.Path(model_dir) / name).replace(".mlmodelc", ".mlpackage")
+        str((pathlib.Path(model_dir) / name).with_suffix(".mlpackage"))
         for name in SPLIT_BASE_LM_COMPILED_PARTS
     ]
+
+
+def suggest_m5_max_compat(enabled: bool) -> None:
+    if enabled or platform.system() != "Darwin":
+        return
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, check=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if " ".join(result.stdout.lower().split()) == "apple m5 max":
+        print(
+            "Apple M5 Max detected. If LM loading fails, try: "
+            "voxcpmane2-server --m5-max-compat (issue #15).",
+            flush=True,
+        )
 
 
 def resolve_and_compile_path(
@@ -216,7 +246,11 @@ def resolve_base_lm_paths(
             splits = sorted(p_obj.parent.glob(f"{stem}_part*_of_*.mlpackage")) or sorted(
                 p_obj.parent.glob(f"{stem}_part*_of_*.mlmodelc")
             )
-            if splits:
+            if splits and not any(
+                candidate.exists() for candidate in (
+                    p_obj, p_obj.with_suffix(".mlmodelc"), p_obj.with_suffix(".mlpackage")
+                )
+            ):
                 paths = [str(x) for x in splits]
 
         resolved_paths = [resolve_and_compile_path(p, compile_and_save) for p in paths]
@@ -348,9 +382,17 @@ def load_model(
     projections_path: str | None = None,
     compile_and_save: bool = False,
     startup_warmup_repeats: int = 5,
+    m5_max_compat: bool = False,
 ):
     """Load VoxCPM2Generator. Called once from main()."""
     global generator, MODEL_PATH_PREFIX, VOICE_CACHE_DIR, VOICE_CACHE_DIRS
+
+    if m5_max_compat and (split_base_lm or base_lm_path or residual_lm_path):
+        raise ValueError(
+            "--m5-max-compat cannot be combined with --split-base-lm, "
+            "--base-lm-path, or --residual-lm-path"
+        )
+    suggest_m5_max_compat(m5_max_compat)
 
     if model_dir is not None:
         MODEL_PATH_PREFIX = os.path.abspath(model_dir)
@@ -362,7 +404,9 @@ def load_model(
         print(f"🚀 Downloading models from HuggingFace: {repo_id}")
         MODEL_PATH_PREFIX = snapshot_download(
             repo_id=repo_id,
-            allow_patterns=main_repo_download_patterns(split_base_lm=split_base_lm),
+            allow_patterns=main_repo_download_patterns(
+                split_base_lm=split_base_lm, m5_max_compat=m5_max_compat
+            ),
         )
         if split_base_lm and base_lm_path is None:
             print(
@@ -375,6 +419,26 @@ def load_model(
             )
             base_lm_path = split_base_lm_paths(split_base_lm_dir)
             base_lm_splits = len(base_lm_path)
+
+    if m5_max_compat:
+        # Temporary local override for manual validation before beta publication.
+        local_compat_dir = os.environ.get("VOXCPMANE2_M5_MAX_MODEL_DIR")
+        if local_compat_dir:
+            corrected_dir = pathlib.Path(local_compat_dir).expanduser().resolve()
+            print(f"Using local M5 Max compatibility LMs: {corrected_dir}")
+        else:
+            corrected_dir = pathlib.Path(snapshot_download(
+                repo_id=SPLIT_BASE_LM_REPO_ID,
+                revision=M5_MAX_LM_REVISION,
+                allow_patterns=["config.json", *compiled_package_patterns(M5_MAX_LM_PACKAGES)],
+            ))
+        base_lm_path = [str(corrected_dir / M5_MAX_LM_PACKAGES[0])]
+        residual_lm_path = str(corrected_dir / M5_MAX_LM_PACKAGES[1])
+        # Require the exact selected bundles; never fall back to older cached LMs.
+        for name in M5_MAX_LM_PACKAGES:
+            for required in ("metadata.json", "model.mil"):
+                if not (corrected_dir / name / required).is_file():
+                    raise FileNotFoundError(corrected_dir / name / required)
 
     model_voice_cache_dir = os.path.join(MODEL_PATH_PREFIX, "caches")
     if included_voice_cache_dir is not None:
@@ -423,6 +487,7 @@ def load_model(
 
     generator_model_dir = MODEL_PATH_PREFIX
     gen_kwargs = {
+        "lm_cache_profile": M5_MAX_CACHE_PROFILE if m5_max_compat else None,
         "base_lm_splits": int(base_lm_splits),
         "vae_early_decode_steps": vae_early_decode_steps,
         "vae_batch_decode_steps": vae_batch_decode_steps,
@@ -650,7 +715,9 @@ class VoiceStore:
         return None
 
     def lm_prefix_paths(self, voice_name: str) -> tuple[list[str], str]:
-        filename = f"{voice_name}.lm_prefix.npz"
+        profile = getattr(generator, "lm_cache_profile", None)
+        suffix = f".{profile}" if profile else ""
+        filename = f"{voice_name}{suffix}.lm_prefix.npz"
         read_paths = []
         for directory in VOICE_CACHE_DIRS:
             path = os.path.join(directory, filename)
@@ -1441,6 +1508,12 @@ async def health_check():
 
 def main():
     parser = argparse.ArgumentParser(description="VoxCPM2 TTS Server")
+    parser.add_argument(
+        "--m5-max-compat", action="store_true",
+        help=("Use corrected cached-mask BaseLM and ResidualLM packages for M5 Max "
+              "(issue #15). Default: disabled. Downloads only the corrected LM pair; "
+              "cannot be combined with --split-base-lm or explicit LM paths."),
+    )
     parser.add_argument("--port", "-p", type=int, default=8000)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument(

@@ -1,5 +1,36 @@
 # VoxCPMANE2
 
+## Apple Silicon Compatibility (0.1.3b2)
+
+For M5 Max users affected by [issue #15](https://github.com/0seba/VoxCPMANE/issues/15),
+beta 2 adds an opt-in corrected BaseLM and ResidualLM pair:
+
+```bash
+python3.12 -m pip install --upgrade 'voxcpmane2 @ git+https://github.com/0seba/VoxCPMANE.git@0.1.3b2'
+voxcpmane2-server --m5-max-compat
+```
+
+Beta 2 is available for testing from the GitHub branch, not PyPI. Run the install
+command in a Python 3.12 virtual environment. To test this checkout directly,
+run `uv run voxcpmane2-server --m5-max-compat` from this directory.
+
+This flag downloads only the corrected LM bundles and `config.json` from a pinned
+revision of [the debug model repository](https://huggingface.co/seba/VoxCPMANE2-Debug-Models/tree/3a33ff35d350da2ac3d562dafc8e930faeeae59f).
+Other components still come from the normal model repository; the original LMs
+are not downloaded in this mode. Existing downloads are not deleted. Compatibility
+mode uses separate LM prefix caches, while existing voice embeddings remain usable.
+All four LM modes are supported; the default remains `single-length`.
+
+On M5 Max, startup suggests this flag without enabling it automatically. It cannot
+be combined with `--split-base-lm` or explicit BaseLM/ResidualLM path overrides.
+Default startup continues to use the original models.
+
+**M1 users:** beta 2 also retains the beta 1 workaround. Try
+`voxcpmane2-server --split-base-lm` for BaseLM load failures mentioning
+`Must re-compile the E5 bundle` or `functionName`.
+
+## Quick Start
+
 Install the VoxCPM2 package:
 
 ```bash
