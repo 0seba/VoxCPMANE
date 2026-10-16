@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "voxcpmane2"
 version = "0.1.3b2"
 description = "VoxCPM2 TTS runtime + HTTP server for Apple Neural Engine"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
 readme = "README.md"
 
